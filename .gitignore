@@ -25,3 +25,7 @@ doxygen/
 *.svf
 cmake-build-debug/
 compile_commands.json
+case/
+other.md
+llvm.sh
+
