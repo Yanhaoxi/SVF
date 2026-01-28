@@ -461,7 +461,11 @@ const std::string LLVMUtil::getSourceLoc(const Value* val )
     {
         if (SVFUtil::isa<AllocaInst>(inst))
         {
+#if LLVM_VERSION_MAJOR > 16
+            for (llvm::DbgInfoIntrinsic *DII : llvm::findDbgDeclares(const_cast<Instruction*>(inst)))
+#else
             for (llvm::DbgInfoIntrinsic *DII : FindDbgDeclareUses(const_cast<Instruction*>(inst)))
+#endif
             {
                 if (llvm::DbgDeclareInst *DDI = SVFUtil::dyn_cast<llvm::DbgDeclareInst>(DII))
                 {
@@ -751,4 +755,9 @@ const std::string SVFValue::valueOnlyToString() const
     return rawstr.str();
 }
 
-} // namespace SVF
+const bool SVFValue::hasLLVMValue() const
+{
+    return LLVMModuleSet::getLLVMModuleSet()->hasLLVMValue(this);
+
+}
+}// namespace SVF
