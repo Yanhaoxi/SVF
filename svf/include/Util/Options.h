@@ -107,6 +107,14 @@ public:
     // Sparse value-flow graph (VFG.cpp)
     static const Option<bool> DumpVFG;
 
+    // Version dependency graph (VersionedFlowSensitive.cpp)
+    static const Option<bool> DumpVDG;
+    static const Option<bool> VDGSplitByObject;
+    static const Option<u32_t> VDGMinNodes;
+    static const Option<u32_t> VDGMaxNodes;
+    static const Option<std::string> VDGOutput;
+    static Option<bool> DetectSE;
+
     // Base class of pointer analyses (PointerAnalysis.cpp)
     static const Option<bool> TypePrint;
     static const Option<bool> FuncPointerPrint;

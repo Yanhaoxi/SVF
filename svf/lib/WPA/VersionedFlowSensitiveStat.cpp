@@ -97,6 +97,7 @@ void VersionedFlowSensitiveStat::performStat()
     timeStatMap["meldLabelingTime"]   = vfspta->meldLabelingTime;
     timeStatMap["PrelabelingTime"]    = vfspta->prelabelingTime;
     timeStatMap["VersionPropTime"]    = vfspta->versionPropTime;
+    timeStatMap["VDGBuildTime"]      = vfspta->vdgBuildTime;
 
     PTNumStatMap["TotalPointers"]  = pag->getValueNodeNum();
     PTNumStatMap["TotalObjects"]   = pag->getObjectNodeNum();

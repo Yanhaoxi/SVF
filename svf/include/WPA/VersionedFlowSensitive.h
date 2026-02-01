@@ -15,10 +15,12 @@
 #define VFS_H_
 
 #include "Graphs/SVFGOPT.h"
+#include "Graphs/VDG.h"
 #include "MSSA/SVFGBuilder.h"
 #include "WPA/FlowSensitive.h"
 #include "WPA/WPAFSSolver.h"
 #include "MemoryModel/PointsTo.h"
+#include <memory>
 
 namespace SVF
 {
@@ -135,6 +137,8 @@ public:
     /// Dumps versionReliance and stmtReliance.
     void dumpReliances(void) const;
 
+    void drawVersionDependencyGraph(const std::string& filename) const;
+
     /// Dumps maps consume and yield.
     void dumpLocVersionMaps(void) const;
 
@@ -192,11 +196,22 @@ private:
     /// Sets the yielded version of o at l to v.
     void setYield(const NodeID l, const NodeID o, const Version v);
 
+    void buildVersionDependencyGraphs(void);
+    void writeVersionDependencyGraphs(const std::string& filename,
+                                      const Map<NodeID, std::unique_ptr<VDG>> &graphs) const;
+    inline const Map<NodeID, std::unique_ptr<VDG>>& getVDGGraphs() const
+    {
+        return vdgGraphs;
+    }
+
     /// Maps locations to objects to a version. The object version is what is
     /// consumed at that location.
     LocVersionMap consume;
     /// Actual yield map. Yield analogue to consume.
     LocVersionMap yield;
+
+    /// Version dependency graph(s), keyed by object when split by object.
+    Map<NodeID, std::unique_ptr<VDG>> vdgGraphs;
 
     /// o -> (version -> versions which rely on it).
     VersionRelianceMap versionReliance;
@@ -244,6 +259,7 @@ private:
     double prelabelingTime;  ///< Time to prelabel SVFG.
     double meldLabelingTime; ///< Time to meld label SVFG.
     double versionPropTime;  ///< Time to propagate versions to versions which rely on them.
+    double vdgBuildTime;     ///< Time to build VDG after meld labeling.
     //@}
 
     static VersionedFlowSensitive *vfspta;

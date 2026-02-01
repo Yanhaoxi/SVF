@@ -147,6 +147,7 @@ public:
         TCTNodeKd,        // Thread creation tree node
         DCHNodeKd,        // DCHG node
         BasicBlockKd,     // Basic block node
+        VDGNodeKd,        // Version dependency graph node
         OtherKd           // Other node kind
     };
 

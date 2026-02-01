@@ -201,6 +201,42 @@ const Option<bool> Options::DumpVFG(
     false
 );
 
+const Option<bool> Options::DumpVDG(
+    "dump-vdg",
+    "Dump dot graph of Version Dependency Graph",
+    false
+);
+
+const Option<bool> Options::VDGSplitByObject(
+    "vdg-split",
+    "Split VDG by object (one file per object)",
+    false
+);
+
+const Option<u32_t> Options::VDGMinNodes(
+    "vdg-min-nodes",
+    "Minimum node count for emitting a VDG",
+    2
+);
+
+const Option<u32_t> Options::VDGMaxNodes(
+    "vdg-max-nodes",
+    "Maximum node count for emitting a VDG (0 disables limit)",
+    0
+);
+
+const Option<std::string> Options::VDGOutput(
+    "vdg-out",
+    "Output filename/template for VDG (use %o when split by object)",
+    "vfs_vdg"
+);
+
+Option<bool> Options::DetectSE(
+    "detect-se",
+    "Include store (dashed) edges when computing SCC on VDG",
+    true
+);
+
 
 // Base class of pointer analyses (PointerAnalysis.cpp)
 const Option<bool> Options::TypePrint(
