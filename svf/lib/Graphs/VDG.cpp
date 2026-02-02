@@ -36,71 +36,71 @@ using namespace SVF;
 
 VDGNode::iterator VDGNode::directOutEdgeBegin()
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::OutEdgeBegin();
-    return relianceOutEdges.begin();
+    return solidOutEdges.begin();
 }
 
 VDGNode::iterator VDGNode::directOutEdgeEnd()
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::OutEdgeEnd();
-    return relianceOutEdges.end();
+    return solidOutEdges.end();
 }
 
 VDGNode::iterator VDGNode::directInEdgeBegin()
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::InEdgeBegin();
-    return relianceInEdges.begin();
+    return solidInEdges.begin();
 }
 
 VDGNode::iterator VDGNode::directInEdgeEnd()
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::InEdgeEnd();
-    return relianceInEdges.end();
+    return solidInEdges.end();
 }
 
 VDGNode::const_iterator VDGNode::directOutEdgeBegin() const
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::OutEdgeBegin();
-    return relianceOutEdges.begin();
+    return solidOutEdges.begin();
 }
 
 VDGNode::const_iterator VDGNode::directOutEdgeEnd() const
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::OutEdgeEnd();
-    return relianceOutEdges.end();
+    return solidOutEdges.end();
 }
 
 VDGNode::const_iterator VDGNode::directInEdgeBegin() const
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::InEdgeBegin();
-    return relianceInEdges.begin();
+    return solidInEdges.begin();
 }
 
 VDGNode::const_iterator VDGNode::directInEdgeEnd() const
 {
-    if (VDG::detectSE())
+    if (VDG::detectVE())
         return GenericVDGNodeTy::InEdgeEnd();
-    return relianceInEdges.end();
+    return solidInEdges.end();
 }
 
-void VDG::setDetectSE(bool flag)
+void VDG::setDetectVE(bool flag)
 {
-    Options::DetectSE.setValue(flag);
+    Options::DetectVE.setValue(flag);
 }
 
-bool VDG::detectSE()
+bool VDG::detectVE()
 {
-    return Options::DetectSE();
+    return Options::DetectVE();
 }
 
-void VDG::dump(const std::string& filename) const
+void VDG::dump(const std::string& filename)
 {
     std::string name = filename;
     if (name.size() >= 4 && name.substr(name.size() - 4) == ".dot")
@@ -108,7 +108,7 @@ void VDG::dump(const std::string& filename) const
     GraphPrinter::WriteGraphToFile(SVFUtil::outs(), name, this);
 }
 
-void VDG::view() const
+void VDG::view()
 {
     SVF::ViewGraph(this, "Version Dependency Graph");
 }
@@ -140,16 +140,21 @@ struct DOTGraphTraits<VDG*> : public DefaultDOTGraphTraits
 
     static std::string getNodeAttributes(NodeType *node, VDG*)
     {
-        if (node->isLoadConsume())
-            return "shape=box, style=filled, fillcolor=lightblue";
-        return "shape=ellipse";
+        const bool loadConsume = node->isLoadConsume();
+        const bool storeYield = node->isStoreYield();
+
+        std::string attrs;
+        attrs += loadConsume ? "shape=box" : "shape=ellipse";
+        attrs += ", style=filled";
+        attrs += storeYield ? ", fillcolor=mistyrose" : ", fillcolor=white";
+        return attrs;
     }
 
     template<class EdgeIter>
     static std::string getEdgeAttributes(NodeType*, EdgeIter EI, VDG*)
     {
         VDGEdge* edge = *(EI.getCurrent());
-        if (edge && edge->isStoreEdge())
+        if (edge && edge->isVirtualEdge())
             return "style=dashed";
         return "";
     }

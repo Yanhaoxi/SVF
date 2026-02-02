@@ -231,9 +231,9 @@ const Option<std::string> Options::VDGOutput(
     "vfs_vdg"
 );
 
-Option<bool> Options::DetectSE(
-    "detect-se",
-    "Include store (dashed) edges when computing SCC on VDG",
+Option<bool> Options::DetectVE(
+    "detect-ve",
+    "Include virtual (dashed) edges when computing SCC on VDG",
     true
 );
 

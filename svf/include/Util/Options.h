@@ -113,7 +113,8 @@ public:
     static const Option<u32_t> VDGMinNodes;
     static const Option<u32_t> VDGMaxNodes;
     static const Option<std::string> VDGOutput;
-    static Option<bool> DetectSE;
+    // Include virtual (dashed) edges when computing SCC on VDG.
+    static Option<bool> DetectVE;
 
     // Base class of pointer analyses (PointerAnalysis.cpp)
     static const Option<bool> TypePrint;

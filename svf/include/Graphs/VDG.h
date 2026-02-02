@@ -31,6 +31,7 @@
 
 #include "Graphs/GenericGraph.h"
 #include "Util/GeneralType.h"
+#include <cassert>
 #include <string>
 
 namespace SVF
@@ -43,16 +44,34 @@ typedef GenericEdge<VDGNode> GenericVDGEdgeTy;
 class VDGEdge : public GenericVDGEdgeTy
 {
 public:
+    // virtual => may / flow solid => must flow
+    // kind => src to dst edge kind (from direct dependency/store flow/indirect call)
     enum VDGEdgeK
     {
-        Reliance = 1,
-        Store = 2
+        Depend = 1,
+        StoreFlow = 2,
+        IndCallFlow = 3
     };
 
     typedef GenericNode<VDGNode, VDGEdge>::GEdgeSetTy VDGEdgeSetTy;
+    typedef struct equalGEdge
+    {
+        bool operator()(const VDGEdge* lhs, const VDGEdge* rhs) const
+        {
+            const GEdgeFlag lhsFlag = lhs->getEdgeKindWithoutMask() & VirtualEdgeFlag;
+            const GEdgeFlag rhsFlag = rhs->getEdgeKindWithoutMask() & VirtualEdgeFlag;
+            if (lhsFlag != rhsFlag)
+                return lhsFlag < rhsFlag;
+            if (lhs->getSrcID() != rhs->getSrcID())
+                return lhs->getSrcID() < rhs->getSrcID();
+            return lhs->getDstID() < rhs->getDstID();
+        }
+    } equalGEdge;
 
-    VDGEdge(VDGNode *src, VDGNode *dst, VDGEdgeK kind)
-        : GenericVDGEdgeTy(src, dst, kind)
+    VDGEdge(VDGNode *src, VDGNode *dst, VDGEdgeK kind, bool isVirtual = false)
+        : GenericVDGEdgeTy(src, dst,
+                           (static_cast<GEdgeFlag>(kind) & KindMask)
+                           | (isVirtual ? VirtualEdgeFlag : 0))
     {
     }
 
@@ -60,13 +79,22 @@ public:
 
     inline VDGEdgeK getVDGEdgeKind() const
     {
-        return static_cast<VDGEdgeK>(getEdgeKind());
+        return static_cast<VDGEdgeK>(getEdgeKind() & KindMask);
     }
 
     inline bool isStoreEdge() const
     {
-        return getVDGEdgeKind() == Store;
+        return getVDGEdgeKind() == StoreFlow;
     }
+
+    inline bool isVirtualEdge() const
+    {
+        return (getEdgeKindWithoutMask() & VirtualEdgeFlag) != 0;
+    }
+
+protected:
+    static constexpr GEdgeFlag VirtualEdgeFlag = (1ULL << (EdgeKindMaskBits - 1));
+    static constexpr GEdgeFlag KindMask = VirtualEdgeFlag - 1;
 };
 
 typedef GenericNode<VDGNode, VDGEdge> GenericVDGNodeTy;
@@ -122,18 +150,24 @@ public:
         storeYield = storeYield || value;
     }
 
-    bool addIncomingEdgeWithKind(VDGEdge* inEdge, VDGEdge::VDGEdgeK kind)
+    bool addIncomingEdgeWithKind(VDGEdge* inEdge)
     {
+        const bool isVirtual = inEdge->isVirtualEdge();
         bool added1 = GenericVDGNodeTy::addIncomingEdge(inEdge);
-        bool added2 = (kind == VDGEdge::Store ? storeInEdges : relianceInEdges).insert(inEdge).second;
-        return added1 && added2;
+        bool added2 = (isVirtual ? virtualInEdges : solidInEdges).insert(inEdge).second;
+        bool both_added = added1 & added2;
+        assert(both_added && "edge not added, duplicated adding!!");
+        return both_added;
     }
 
-    bool addOutgoingEdgeWithKind(VDGEdge* outEdge, VDGEdge::VDGEdgeK kind)
+    bool addOutgoingEdgeWithKind(VDGEdge* outEdge)
     {
+        const bool isVirtual = outEdge->isVirtualEdge();
         bool added1 = GenericVDGNodeTy::addOutgoingEdge(outEdge);
-        bool added2 = (kind == VDGEdge::Store ? storeOutEdges : relianceOutEdges).insert(outEdge).second;
-        return added1 && added2;
+        bool added2 = (isVirtual ? virtualOutEdges : solidOutEdges).insert(outEdge).second;
+        bool both_added = added1 & added2;
+        assert(both_added && "edge not added, duplicated adding!!");
+        return both_added;
     }
 
     VDGEdgeSetTy::iterator directOutEdgeBegin() override;
@@ -155,14 +189,24 @@ public:
         return node->getNodeKind() == VDGNodeKd;
     }
 
+    inline const VDGEdgeSetTy& getSolidOutEdges() const
+    {
+        return solidOutEdges;
+    }
+
+    inline const VDGEdgeSetTy& getVirtualOutEdges() const
+    {
+        return virtualOutEdges;
+    }
+
 private:
     VersionedVar var;
     bool loadConsume;
     bool storeYield;
-    VDGEdgeSetTy relianceInEdges;
-    VDGEdgeSetTy relianceOutEdges;
-    VDGEdgeSetTy storeInEdges;
-    VDGEdgeSetTy storeOutEdges;
+    VDGEdgeSetTy solidInEdges;
+    VDGEdgeSetTy solidOutEdges;
+    VDGEdgeSetTy virtualInEdges;
+    VDGEdgeSetTy virtualOutEdges;
 };
 
 class VDG : public GenericGraph<VDGNode, VDGEdge>
@@ -176,11 +220,11 @@ public:
 
     ~VDG() override = default;
 
-    static void setDetectSE(bool flag);
-    static bool detectSE();
+    static void setDetectVE(bool flag);
+    static bool detectVE();
 
-    void dump(const std::string& filename) const;
-    void view() const;
+    void dump(const std::string& filename);
+    void view();
 
     VDGNode* getOrAddNode(NodeID obj, Version ver, bool loadConsume = false, bool storeYield = false)
     {
@@ -210,32 +254,49 @@ public:
         return nodeMap;
     }
 
-    VDGEdge* addVDGEdge(VDGNode *src, VDGNode *dst, VDGEdge::VDGEdgeK kind)
+    VDGEdge* addVDGEdge(VDGNode *src, VDGNode *dst, VDGEdge::VDGEdgeK kind, bool isVirtual)
     {
-        if (VDGEdge *edge = findEdge(src, dst, kind))
+        if (VDGEdge *edge = findEdge(src, dst, kind, isVirtual))
             return edge;
 
-        VDGEdge *edge = new VDGEdge(src, dst, kind);
-        src->addOutgoingEdgeWithKind(edge, kind);
-        dst->addIncomingEdgeWithKind(edge, kind);
+        VDGEdge *edge = new VDGEdge(src, dst, kind, isVirtual);
+        src->addOutgoingEdgeWithKind(edge);
+        dst->addIncomingEdgeWithKind(edge);
         return edge;
     }
 
 private:
-    VDGEdge* findEdge(const VDGNode *src, const VDGNode *dst, VDGEdge::VDGEdgeK kind) const
+    VDGEdge* findEdge(const VDGNode *src, const VDGNode *dst, VDGEdge::VDGEdgeK kind, bool isVirtual) const
     {
-        for (VDGEdge *edge : src->getOutEdges())
-        {
-            if (edge->getDstNode() == dst && edge->getVDGEdgeKind() == kind)
-                return edge;
-        }
-        return nullptr;
+        VDGEdge edge(const_cast<VDGNode*>(src), const_cast<VDGNode*>(dst), kind, isVirtual);
+        const VDGNode::VDGEdgeSetTy &edges = isVirtual
+            ? src->getVirtualOutEdges()
+            : src->getSolidOutEdges();
+        VDGNode::VDGEdgeSetTy::const_iterator it = edges.find(&edge);
+        return it == edges.end() ? nullptr : *it;
     }
 
     VDGNodeMapTy nodeMap;
     NodeID nextNodeId;
 };
 
+} // namespace SVF
+
+namespace SVF
+{
+template<> struct GenericGraphTraits<SVF::VDGNode*> : public GenericGraphTraits<SVF::GenericNode<SVF::VDGNode,SVF::VDGEdge>*  >
+{
+};
+
+template<>
+struct GenericGraphTraits<Inverse<SVF::VDGNode*> > : public GenericGraphTraits<Inverse<SVF::GenericNode<SVF::VDGNode,SVF::VDGEdge>* > >
+{
+};
+
+template<> struct GenericGraphTraits<SVF::VDG*> : public GenericGraphTraits<SVF::GenericGraph<SVF::VDGNode,SVF::VDGEdge>* >
+{
+    typedef SVF::VDGNode* NodeRef;
+};
 } // namespace SVF
 
 #endif /* VDG_H_ */

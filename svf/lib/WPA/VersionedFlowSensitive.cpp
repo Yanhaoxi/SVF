@@ -925,11 +925,49 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
 
     vdgGraphs.clear();
 
+    std::vector<int8_t> nonSingletonCache(pag->getTotalNodeNum(), -1);
+    auto isNonSingletonObj = [&](const NodeID o) -> bool
+    {
+        int8_t &cached = nonSingletonCache[o];
+        if (cached >= 0) return cached != 0;
+        const bool nonSingleton = isHeapMemObj(o) || isArrayMemObj(o)
+            || pag->getBaseObject(o)->isFieldInsensitive()
+            || isLocalVarInRecursiveFun(o);
+        cached = nonSingleton ? 1 : 0;
+        return nonSingleton;
+    };
+
     auto getGraph = [&](const NodeID o) -> VDG&
     {
         std::unique_ptr<VDG> &graph = vdgGraphs[o];
         if (!graph) graph.reset(new VDG());
         return *graph;
+    };
+
+    auto addVirtualIndCallEdge = [&](NodeID srcId, NodeID dstId)
+    {
+        const SVFGNode *srcNode = svfg->getSVFGNode(srcId);
+        const SVFGNode *dstNode = svfg->getSVFGNode(dstId);
+        const MRSVFGNode *srcMR = SVFUtil::dyn_cast<MRSVFGNode>(srcNode);
+        const MRSVFGNode *dstMR = SVFUtil::dyn_cast<MRSVFGNode>(dstNode);
+        if (!srcMR || !dstMR) return;
+
+        NodeBS cpts = srcMR->getPointsTo();
+        if (!cpts.intersects(dstMR->getPointsTo())) return;
+        cpts &= dstMR->getPointsTo();
+
+        for (const NodeID o : cpts)
+        {
+            const Version srcY = getYield(srcId, o);
+            if (srcY == invalidVersion) continue;
+            const Version dstC = getConsume(dstId, o);
+            if (dstC == invalidVersion) continue;
+
+            VDG &graph = getGraph(o);
+            VDGNode *src = graph.getOrAddNode(o, srcY, false, false);
+            VDGNode *dst = graph.getOrAddNode(o, dstC, false, false);
+            graph.addVDGEdge(src, dst, VDGEdge::IndCallFlow, true);
+        }
     };
 
     for (NodeID l = 0; l < consume.size(); ++l)
@@ -965,13 +1003,12 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
         if (isStore(l))
         {
             const StoreSVFGNode *store = SVFUtil::dyn_cast<StoreSVFGNode>(svfg->getSVFGNode(l));
-            bool strongUpdate = false;
-            if (store != nullptr)
-            {
-                const NodeID p = store->getPAGDstNodeID();
-                strongUpdate = (ander->getPts(p).count() <= 1);
-            }
-            if (strongUpdate)
+            if (store == nullptr)
+                continue;
+
+            const NodeID p = store->getPAGDstNodeID();
+            const PointsTo &dstPts = ander->getPts(p);
+            if (dstPts.count() == 0)
                 continue;
 
             const ObjToVersionMap &storeConsume = consumeMap;
@@ -981,6 +1018,7 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                 for (const ObjToVersionMap::value_type &ov : storeConsume)
                 {
                     const NodeID o = ov.first;
+                    const bool nonSingletonObj = isNonSingletonObj(o);
                     const Version a = ov.second;
                     if (a == invalidVersion) continue;
                     const ObjToVersionMap::const_iterator yIt = storeYield.find(o);
@@ -990,11 +1028,65 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                     VDG &graph = getGraph(o);
                     VDGNode *src = graph.getOrAddNode(o, a, false, false);
                     VDGNode *dst = graph.getOrAddNode(o, b, false, true);
-                    graph.addVDGEdge(src, dst, VDGEdge::Store);
+                    if (nonSingletonObj)
+                        graph.addVDGEdge(src, dst, VDGEdge::StoreFlow, false);
+                    else
+                        graph.addVDGEdge(src, dst, VDGEdge::StoreFlow, true);
                 }
             }
         }
+        // 处理 delta nodes 的 virtual edges
+        // case: function entry node (formal-in)
+        else if (const FunObjVar *fn = svfg->isFunEntrySVFGNode(svfg->getSVFGNode(l)))
+        {
+            if (svfg->hasFormalINSVFGNodes(fn))
+            {
+                const SVFG::FormalINSVFGNodeSet &formalIns = svfg->getFormalINSVFGNodes(fn);
+                if (formalIns.test(l))
+                {
+                    CallGraphEdge::CallInstSet callsites;
+                    ander->getCallGraph()->getIndCallSitesInvokingCallee(fn, callsites);
+                    for (const CallICFGNode *cs : callsites)
+                    {
+                        if (!svfg->hasActualINSVFGNodes(cs)) continue;
+                        const SVFG::ActualINSVFGNodeSet &actualIns = svfg->getActualINSVFGNodes(cs);
+                        for (const NodeID srcId : actualIns)
+                        {
+                            addVirtualIndCallEdge(srcId, l);
+                        }
+                    }
+                }
+            }
+        }
+        // case: callsite return node (actual-out)
+        else if (const CallICFGNode *cs = svfg->isCallSiteRetSVFGNode(svfg->getSVFGNode(l)))
+        {
+            if (cs->isIndirectCall() && svfg->hasActualOUTSVFGNodes(cs))
+            {
+                const SVFG::ActualOUTSVFGNodeSet &actualOuts = svfg->getActualOUTSVFGNodes(cs);
+                if (actualOuts.test(l))
+                {
+                    CallGraph *cg = ander->getCallGraph();
+                    if (cg->hasCallGraphEdge(cs))
+                    {
+                        for (CallGraph::CallGraphEdgeSet::const_iterator it = cg->getCallEdgeBegin(cs),
+                             eit = cg->getCallEdgeEnd(cs); it != eit; ++it)
+                        {
+                            const FunObjVar *callee = (*it)->getDstNode()->getFunction();
+                            if (!svfg->hasFormalOUTSVFGNodes(callee)) continue;
+                            const SVFG::FormalOUTSVFGNodeSet &formalOuts = svfg->getFormalOUTSVFGNodes(callee);
+                            for (const NodeID srcId : formalOuts)
+                            {
+                                addVirtualIndCallEdge(srcId, l);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
     }
+    // dumpReliances();
 
     for (const VersionRelianceMap::value_type &ovrv : versionReliance)
     {
@@ -1009,7 +1101,7 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                 VDG &graph = getGraph(o);
                 VDGNode *src = graph.getOrAddNode(o, v, false, false);
                 VDGNode *dst = graph.getOrAddNode(o, rv, false, false);
-                graph.addVDGEdge(src, dst, VDGEdge::Reliance);
+                graph.addVDGEdge(src, dst, VDGEdge::Depend, false);
             }
         }
     }
@@ -1104,7 +1196,8 @@ void VersionedFlowSensitive::writeVersionDependencyGraphs(const std::string& fil
                                                             src->isLoadConsume(), src->isStoreYield());
                     VDGNode *mergedDst = merged.getOrAddNode(dst->getObject(), dst->getVersion(),
                                                             dst->isLoadConsume(), dst->isStoreYield());
-                    merged.addVDGEdge(mergedSrc, mergedDst, edge->getVDGEdgeKind());
+                    merged.addVDGEdge(mergedSrc, mergedDst, edge->getVDGEdgeKind(),
+                                      edge->isVirtualEdge());
                 }
             }
         }
@@ -1127,8 +1220,12 @@ void VersionedFlowSensitive::drawVersionDependencyGraph(const std::string& filen
 void VersionedFlowSensitive::dumpLocVersionMaps(void) const
 {
     SVFUtil::outs() << "# LocVersion Maps\n";
+    auto num = 0;
     for (SVFG::iterator it = svfg->begin(); it != svfg->end(); ++it)
     {
+        if(num >= consume.size()) {
+            break;
+        }
         const NodeID loc = it->first;
         bool locPrinted = false;
         for (const LocVersionMap *lvm :
@@ -1156,6 +1253,7 @@ void VersionedFlowSensitive::dumpLocVersionMaps(void) const
 
             SVFUtil::outs() << "\n";
         }
+        num++;
     }
 
 }
