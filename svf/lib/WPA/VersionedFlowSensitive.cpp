@@ -14,6 +14,7 @@
 #include "MemoryModel/PointsTo.h"
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -1061,7 +1062,9 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                     const Version b = yIt->second;
                     if (b == invalidVersion) continue;
                     VDG &graph = getGraph(o);
-                    assert(a != b && "store consume and yield versions should not be the same!");
+                    // 版本一致无需建边
+                    if (a == b)
+                        continue;
                     VDGNode *src = graph.getOrAddNode(o, a, false, false);
                     VDGNode *dst = graph.getOrAddNode(o, b, false, true);
                     if (nonSingletonObj)
@@ -1173,6 +1176,7 @@ void VersionedFlowSensitive::dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>
 
     size_t totalGraphs = 0;
     size_t totalNodes = 0;
+    size_t totalSuperNodes = 0;
     size_t totalEdges = 0;
     size_t minNodes = std::numeric_limits<size_t>::max();
     size_t maxNodes = 0;
@@ -1184,13 +1188,15 @@ void VersionedFlowSensitive::dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>
             continue;
         const VDG *graph = entry.second.get();
         size_t nodeCount = 0;
+        size_t supernodeCount = 0;
         size_t edgeCount = 0;
         for (const VDG::VDGNodeMapTy::value_type &nodeEntry : graph->getNodeMap())
         {
             const VDGNode *node = nodeEntry.second;
+            ++nodeCount;
             if (!graph->isSuperNode(node->getId()))
                 continue;
-            ++nodeCount;
+            ++supernodeCount;
             for (auto it = node->OutEdgeBegin(); it != node->OutEdgeEnd(); ++it)
             {
                 const VDGEdge *edge = *it;
@@ -1199,12 +1205,13 @@ void VersionedFlowSensitive::dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>
             }
         }
 
-        nodesToObjCount[nodeCount] += 1;
+        nodesToObjCount[supernodeCount] += 1;
         totalGraphs += 1;
+        totalSuperNodes += supernodeCount;
         totalNodes += nodeCount;
         totalEdges += edgeCount;
-        minNodes = std::min(minNodes, nodeCount);
-        maxNodes = std::max(maxNodes, nodeCount);
+        minNodes = std::min(minNodes, supernodeCount);
+        maxNodes = std::max(maxNodes, supernodeCount);
     }
 
     if (totalGraphs == 0)
@@ -1213,11 +1220,12 @@ void VersionedFlowSensitive::dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>
     SVFUtil::outs() << "# VDG stats\n";
     SVFUtil::outs() << "  graphs: " << totalGraphs << "\n";
     SVFUtil::outs() << "  total_nodes: " << totalNodes << "\n";
+    SVFUtil::outs() << "  total_supernodes: " << totalSuperNodes << "\n";
     SVFUtil::outs() << "  total_edges: " << totalEdges << "\n";
-    SVFUtil::outs() << "  min_nodes: " << minNodes << "\n";
-    SVFUtil::outs() << "  max_nodes: " << maxNodes << "\n";
-    SVFUtil::outs() << "  avg_nodes: " << (static_cast<double>(totalNodes) / totalGraphs) << "\n";
-    SVFUtil::outs() << "  nodes->objs:\n";
+    SVFUtil::outs() << "  min_supernodes: " << minNodes << "\n";
+    SVFUtil::outs() << "  max_supernodes: " << maxNodes << "\n";
+    SVFUtil::outs() << "  avg_supernodes: " << (static_cast<double>(totalSuperNodes) / totalGraphs) << "\n";
+    SVFUtil::outs() << "  supernodes->objs:\n";
     for (const OrderedMap<size_t, size_t>::value_type &kv : nodesToObjCount)
         SVFUtil::outs() << "    " << kv.first << " : " << kv.second << "\n";
 }

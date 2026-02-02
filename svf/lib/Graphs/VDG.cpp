@@ -32,6 +32,7 @@
 #include "Graphs/SCC.h"
 #include "Util/Options.h"
 #include "Util/SVFUtil.h"
+#include <cassert>
 #include <sstream>
 #include <vector>
 
@@ -143,8 +144,33 @@ void VDG::removeVDGEdge(VDGEdge* edge)
     delete edge;
 }
 
-void VDG::moveEdgesToRepNode(VDGNode* node, VDGNode* rep)
+void VDG::removeNode(VDGNode* node)
 {
+    assert(node && "VDG node to be removed is null!");
+    const NodeID repId = node->getId();
+    std::vector<VDGEdge*> edges;
+    for (VDGNode::const_iterator it = node->InEdgeBegin(), eit = node->InEdgeEnd(); it != eit; ++it)
+        edges.push_back(*it);
+    for (VDGEdge* edge : edges)
+        removeVDGEdge(edge);
+
+    edges.clear();
+    for (VDGNode::const_iterator it = node->OutEdgeBegin(), eit = node->OutEdgeEnd(); it != eit; ++it)
+        edges.push_back(*it);
+    for (VDGEdge* edge : edges)
+        removeVDGEdge(edge);
+
+    NodeBS subs = getSubs(repId);
+    // assume sub has no edges
+    for (const NodeID subId : subs)
+        deleteNode(subId);
+}
+
+void VDG::moveEdgesToNode(VDGNode* node, VDGNode* rep)
+{
+    NodeID repId = getRep(rep->getId());
+    rep = getGNode(repId);
+    assert(rep && "rep node not found in VDG!");
     std::vector<VDGEdge*> inSccEdges;
     std::vector<VDGEdge*> inNonSccEdges;
     for (VDGNode::const_iterator it = node->InEdgeBegin(), eit = node->InEdgeEnd(); it != eit; ++it)
@@ -183,7 +209,52 @@ void VDG::moveEdgesToRepNode(VDGNode* node, VDGNode* rep)
         removeVDGEdge(edge);
     }
 }
+
+void VDG::mergeNodesIntoRep(const NodeBS& nodes, VDGNode* rep)
+{
+    const NodeID repId = getRep(rep->getId());
+    rep = getGNode(repId);
+    assert(rep && "rep node not found in VDG!");
+    // rep's subs
+    NodeBS mergedSubs = getSubs(repId);
+    // other nodes' subs
+    for (const NodeID id : nodes)
+    {
+        mergedSubs |= getSubs(id);
+    }
+    for (const NodeID id : mergedSubs)
+    {
+        resetSubs(id);
+    }
+    // new subs
+    setSubs(repId, mergedSubs);
+    // new rep
+    for (const NodeID id : mergedSubs)
+    {
+        if (id == repId) continue;
+        setRep(id, repId);
+    }
+    // merge properties
+    for (const NodeID id : mergedSubs)
+    {
+        if (id == repId) continue;
+        VDGNode* sub = getGNode(id);
+        if (!sub) continue;
+        rep->setLoadConsume(sub->isLoadConsume());
+        rep->setStoreYield(sub->isStoreYield());
+    }
+    // move edges
+    for (const NodeID id : mergedSubs)
+    {
+        if (id == repId) continue;
+        VDGNode* sub = getGNode(id);
+        if (!sub) continue;
+        moveEdgesToNode(sub, rep);
+    }
+}
 // must scc merge 
+// rep is not sub of any other node
+// one node has only one rep
 void VDG::sccMergeSolidEdges()
 {
     const bool oldDetect = detectVE();
@@ -208,24 +279,7 @@ void VDG::sccMergeSolidEdges()
         if (subs.count() <= 1) continue;
 
         VDGNode* rep = getGNode(repId);
-        nodeToSubsMap[repId].set(repId);
-
-        for (const NodeID subId : subs)
-        {
-            if (subId == repId) continue;
-            VDGNode* sub = getGNode(subId);
-            rep->setLoadConsume(sub->isLoadConsume());
-            rep->setStoreYield(sub->isStoreYield());
-            setRep(subId, repId);
-            nodeToSubsMap[repId].set(subId);
-        }
-
-        for (const NodeID subId : subs)
-        {
-            if (subId == repId) continue;
-            VDGNode* sub = getGNode(subId);
-            moveEdgesToRepNode(sub, rep);
-        }
+        mergeNodesIntoRep(subs, rep);
     }
 }
 
@@ -262,33 +316,20 @@ void VDG::pruneUnreachableToLoadConsume()
         }
     }
 
-    std::vector<VDGNode*> toRemove;
+    std::vector<NodeID> repsToRemove;
     for (VDG::const_iterator it = begin(), eit = end(); it != eit; ++it)
     {
-        if (!reachable.test(it->first))
-            toRemove.push_back(it->second);
+        const NodeID repId = it->first;
+        if (!isSuperNode(repId) || reachable.test(repId))
+            continue;
+        repsToRemove.push_back(repId);
     }
 
-    for (VDGNode* node : toRemove)
+    for (const NodeID repId : repsToRemove)
     {
-        std::vector<VDGEdge*> edges;
-        for (VDGNode::const_iterator it = node->InEdgeBegin(), eit = node->InEdgeEnd(); it != eit; ++it)
-            edges.push_back(*it);
-        for (VDGEdge* edge : edges)
-            removeVDGEdge(edge);
-
-        edges.clear();
-        for (VDGNode::const_iterator it = node->OutEdgeBegin(), eit = node->OutEdgeEnd(); it != eit; ++it)
-            edges.push_back(*it);
-        for (VDGEdge* edge : edges)
-            removeVDGEdge(edge);
-
-        nodeMap.erase(node->getVersionedVar());
-        nodeToRepMap.erase(node->getId());
-        nodeToSubsMap.erase(node->getId());
-        for (auto &entry : nodeToSubsMap)
-            entry.second.reset(node->getId());
-        removeGNode(node);
+        VDGNode* node = getGNode(repId);
+        assert(node && "rep node not found in VDG!");
+        removeNode(node);
     }
 }
 

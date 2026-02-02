@@ -30,6 +30,7 @@
 #define VDG_H_
 
 #include "Graphs/GenericGraph.h"
+
 #include "Util/GeneralType.h"
 #include <cassert>
 #include <string>
@@ -262,6 +263,7 @@ public:
 
     void dump(const std::string& filename);
     void view();
+    void mergeNodesIntoRep(const NodeBS& nodes, VDGNode* rep);
     void sccMergeSolidEdges();
     void pruneUnreachableToLoadConsume();
 
@@ -342,9 +344,12 @@ public:
         nodeToSubsMap.erase(node);
     }
 
+    // with small side effect
     inline NodeBS& getSubs(NodeID node)
     {
-        return nodeToSubsMap[node];
+        NodeBS &subs = nodeToSubsMap[node];
+        subs.set(node);
+        return subs;
     }
 
     inline NodeID getRep(NodeID node) const
@@ -363,11 +368,23 @@ public:
         nodeToRepMap.erase(node);
     }
 
+    // remove node excluding its edges
+    inline void deleteNode(NodeID nodeId)
+    {
+        VDGNode* node = getGNode(nodeId);
+        assert(node && "node not found in VDG!");
+        nodeMap.erase(node->getVersionedVar());
+        resetRep(nodeId);
+        resetSubs(nodeId);
+        removeGNode(node);
+    }
+
 private:
     void reTargetDstOfEdge(VDGEdge* edge, VDGNode* newDst);
     void reTargetSrcOfEdge(VDGEdge* edge, VDGNode* newSrc);
     void removeVDGEdge(VDGEdge* edge);
-    void moveEdgesToRepNode(VDGNode* node, VDGNode* rep);
+    void removeNode(VDGNode* node);
+    void moveEdgesToNode(VDGNode* node, VDGNode* rep);
 
     VDGEdge* findEdge(const VDGNode *src, const VDGNode *dst) const
     {
