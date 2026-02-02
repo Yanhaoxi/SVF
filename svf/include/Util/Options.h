@@ -109,6 +109,7 @@ public:
 
     // Version dependency graph (VersionedFlowSensitive.cpp)
     static const Option<bool> DumpVDG;
+    static const Option<bool> VDGStat;
     static const Option<bool> VDGSplitByObject;
     static const Option<u32_t> VDGMinNodes;
     static const Option<u32_t> VDGMaxNodes;

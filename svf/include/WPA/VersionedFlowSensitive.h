@@ -197,8 +197,10 @@ private:
     void setYield(const NodeID l, const NodeID o, const Version v);
 
     void buildVersionDependencyGraphs(void);
+    void simplifyVDGGraphs(void);
     void writeVersionDependencyGraphs(const std::string& filename,
                                       const Map<NodeID, std::unique_ptr<VDG>> &graphs) const;
+    void dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>> &graphs) const;
     inline const Map<NodeID, std::unique_ptr<VDG>>& getVDGGraphs() const
     {
         return vdgGraphs;

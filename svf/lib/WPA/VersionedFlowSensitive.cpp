@@ -13,8 +13,10 @@
 #include "Util/Options.h"
 #include "MemoryModel/PointsTo.h"
 #include <algorithm>
+#include <cassert>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <queue>
 #include <thread>
 #include <mutex>
@@ -23,6 +25,26 @@ using namespace SVF;
 
 const Version VersionedFlowSensitive::invalidVersion = 0;
 VersionedFlowSensitive *VersionedFlowSensitive::vfspta = nullptr;
+
+namespace
+{
+    using VDGSimplifyPass = void (*)(VDG &);
+
+    void registerVDGSimplifyPass(std::vector<VDGSimplifyPass> &passes, VDGSimplifyPass pass)
+    {
+        passes.push_back(pass);
+    }
+
+    void vdgSimplifySCCMerge(VDG &graph)
+    {
+        graph.sccMergeSolidEdges();
+    }
+
+    void vdgSimplifyPrune(VDG &graph)
+    {
+        graph.pruneUnreachableToLoadConsume();
+    }
+}
 
 VersionedVar VersionedFlowSensitive::atKey(NodeID var, Version version)
 {
@@ -62,6 +84,19 @@ void VersionedFlowSensitive::initialize()
     prelabel();
     meldLabel();
     buildVersionDependencyGraphs();
+    if (Options::DumpVDG())
+    {
+        std::string outName = Options::VDGOutput();
+        if (outName.empty())
+            outName = "vfs_vdg_init";
+        drawVersionDependencyGraph(outName);
+    }
+    if (Options::VDGStat())
+        dumpVDGStats(vdgGraphs);
+    simplifyVDGGraphs();
+    if (Options::VDGStat())
+        dumpVDGStats(vdgGraphs);
+    
 
     removeAllIndirectSVFGEdges();
 }
@@ -76,7 +111,7 @@ void VersionedFlowSensitive::finalize()
     {
         std::string outName = Options::VDGOutput();
         if (outName.empty())
-            outName = "vfs_vdg";
+            outName = "vfs_vdg_final";
         drawVersionDependencyGraph(outName);
     }
 }
@@ -962,7 +997,7 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
             if (srcY == invalidVersion) continue;
             const Version dstC = getConsume(dstId, o);
             if (dstC == invalidVersion) continue;
-
+            assert(srcY!= dstC && "indirect call virtual edge: delta node consume new version!");
             VDG &graph = getGraph(o);
             VDGNode *src = graph.getOrAddNode(o, srcY, false, false);
             VDGNode *dst = graph.getOrAddNode(o, dstC, false, false);
@@ -1026,6 +1061,7 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                     const Version b = yIt->second;
                     if (b == invalidVersion) continue;
                     VDG &graph = getGraph(o);
+                    assert(a != b && "store consume and yield versions should not be the same!");
                     VDGNode *src = graph.getOrAddNode(o, a, false, false);
                     VDGNode *dst = graph.getOrAddNode(o, b, false, true);
                     if (nonSingletonObj)
@@ -1098,6 +1134,10 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
             for (const Version rv : vrv.second)
             {
                 if (rv == invalidVersion) continue;
+                if (v == rv)
+                {
+                    continue;
+                }
                 VDG &graph = getGraph(o);
                 VDGNode *src = graph.getOrAddNode(o, v, false, false);
                 VDGNode *dst = graph.getOrAddNode(o, rv, false, false);
@@ -1108,6 +1148,78 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
 
     double end = stat->getClk(true);
     vdgBuildTime = (end - start) / TIMEINTERVAL;
+}
+
+void VersionedFlowSensitive::simplifyVDGGraphs(void)
+{
+    std::vector<VDGSimplifyPass> passes;
+    registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
+    registerVDGSimplifyPass(passes, vdgSimplifyPrune);
+
+    for (Map<NodeID, std::unique_ptr<VDG>>::value_type &entry : vdgGraphs)
+    {
+        if (!entry.second)
+            continue;
+        VDG &graph = *entry.second;
+        for (VDGSimplifyPass pass : passes)
+            pass(graph);
+    }
+}
+
+void VersionedFlowSensitive::dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>> &graphs) const
+{
+    if (graphs.empty())
+        return;
+
+    size_t totalGraphs = 0;
+    size_t totalNodes = 0;
+    size_t totalEdges = 0;
+    size_t minNodes = std::numeric_limits<size_t>::max();
+    size_t maxNodes = 0;
+    OrderedMap<size_t, size_t> nodesToObjCount;
+
+    for (const Map<NodeID, std::unique_ptr<VDG>>::value_type &entry : graphs)
+    {
+        if (!entry.second)
+            continue;
+        const VDG *graph = entry.second.get();
+        size_t nodeCount = 0;
+        size_t edgeCount = 0;
+        for (const VDG::VDGNodeMapTy::value_type &nodeEntry : graph->getNodeMap())
+        {
+            const VDGNode *node = nodeEntry.second;
+            if (!graph->isSuperNode(node->getId()))
+                continue;
+            ++nodeCount;
+            for (auto it = node->OutEdgeBegin(); it != node->OutEdgeEnd(); ++it)
+            {
+                const VDGEdge *edge = *it;
+                if (graph->isSuperNode(edge->getDstID()))
+                    ++edgeCount;
+            }
+        }
+
+        nodesToObjCount[nodeCount] += 1;
+        totalGraphs += 1;
+        totalNodes += nodeCount;
+        totalEdges += edgeCount;
+        minNodes = std::min(minNodes, nodeCount);
+        maxNodes = std::max(maxNodes, nodeCount);
+    }
+
+    if (totalGraphs == 0)
+        return;
+
+    SVFUtil::outs() << "# VDG stats\n";
+    SVFUtil::outs() << "  graphs: " << totalGraphs << "\n";
+    SVFUtil::outs() << "  total_nodes: " << totalNodes << "\n";
+    SVFUtil::outs() << "  total_edges: " << totalEdges << "\n";
+    SVFUtil::outs() << "  min_nodes: " << minNodes << "\n";
+    SVFUtil::outs() << "  max_nodes: " << maxNodes << "\n";
+    SVFUtil::outs() << "  avg_nodes: " << (static_cast<double>(totalNodes) / totalGraphs) << "\n";
+    SVFUtil::outs() << "  nodes->objs:\n";
+    for (const OrderedMap<size_t, size_t>::value_type &kv : nodesToObjCount)
+        SVFUtil::outs() << "    " << kv.first << " : " << kv.second << "\n";
 }
 
 void VersionedFlowSensitive::writeVersionDependencyGraphs(const std::string& filename,
@@ -1150,6 +1262,18 @@ void VersionedFlowSensitive::writeVersionDependencyGraphs(const std::string& fil
         return true;
     };
 
+    auto superNodeCount = [&](const VDG &graph) -> size_t
+    {
+        size_t count = 0;
+        for (const VDG::VDGNodeMapTy::value_type &nodeEntry : graph.getNodeMap())
+        {
+            const VDGNode *node = nodeEntry.second;
+            if (graph.isSuperNode(node->getId()))
+                ++count;
+        }
+        return count;
+    };
+
     if (splitByObject)
     {
         std::vector<NodeID> objects;
@@ -1164,7 +1288,7 @@ void VersionedFlowSensitive::writeVersionDependencyGraphs(const std::string& fil
             const std::unique_ptr<VDG> &graphPtr = graphs.at(o);
             if (!graphPtr)
                 continue;
-            if (!withinThreshold(graphPtr->getNodeMap().size()))
+            if (!withinThreshold(superNodeCount(*graphPtr)))
                 continue;
 
             const std::string path = replaceToken(tmpl, o);
@@ -1178,20 +1302,27 @@ void VersionedFlowSensitive::writeVersionDependencyGraphs(const std::string& fil
         {
             if (!entry.second)
                 continue;
-            for (const VDG::VDGNodeMapTy::value_type &nodeEntry : entry.second->getNodeMap())
+            const VDG &graph = *entry.second;
+            for (const VDG::VDGNodeMapTy::value_type &nodeEntry : graph.getNodeMap())
             {
                 const VDGNode *node = nodeEntry.second;
+                if (!graph.isSuperNode(node->getId()))
+                    continue;
                 merged.getOrAddNode(node->getObject(), node->getVersion(),
                                     node->isLoadConsume(), node->isStoreYield());
             }
-            for (const VDG::VDGNodeMapTy::value_type &nodeEntry : entry.second->getNodeMap())
+            for (const VDG::VDGNodeMapTy::value_type &nodeEntry : graph.getNodeMap())
             {
                 const VDGNode *node = nodeEntry.second;
+                if (!graph.isSuperNode(node->getId()))
+                    continue;
                 for (auto it = node->OutEdgeBegin(); it != node->OutEdgeEnd(); ++it)
                 {
                     const VDGEdge *edge = *it;
                     const VDGNode *src = edge->getSrcNode();
                     const VDGNode *dst = edge->getDstNode();
+                    if (!graph.isSuperNode(dst->getId()))
+                        continue;
                     VDGNode *mergedSrc = merged.getOrAddNode(src->getObject(), src->getVersion(),
                                                             src->isLoadConsume(), src->isStoreYield());
                     VDGNode *mergedDst = merged.getOrAddNode(dst->getObject(), dst->getVersion(),
@@ -1202,7 +1333,7 @@ void VersionedFlowSensitive::writeVersionDependencyGraphs(const std::string& fil
             }
         }
 
-        if (!merged.getNodeMap().empty() && withinThreshold(merged.getNodeMap().size()))
+        if (!merged.getNodeMap().empty() && withinThreshold(superNodeCount(merged)))
         {
             merged.dump(filename);
         }

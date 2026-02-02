@@ -207,6 +207,12 @@ const Option<bool> Options::DumpVDG(
     false
 );
 
+const Option<bool> Options::VDGStat(
+    "vdg-stat",
+    "Dump statistics of Version Dependency Graph",
+    false
+);
+
 const Option<bool> Options::VDGSplitByObject(
     "vdg-split",
     "Split VDG by object (one file per object)",

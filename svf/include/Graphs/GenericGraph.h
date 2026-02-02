@@ -130,6 +130,11 @@ public:
 protected:
     static constexpr unsigned char EdgeKindMaskBits = 8;  ///< We use the lower 8 bits to denote edge kind
     static constexpr u64_t EdgeKindMask = (~0ULL) >> (64 - EdgeKindMaskBits);
+
+    inline void setEdgeFlag(GEdgeFlag flag)
+    {
+        edgeFlag = flag;
+    }
 };
 
 
