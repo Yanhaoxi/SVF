@@ -44,6 +44,12 @@ namespace
     void vdgSimplifyPrune(VDG &graph)
     {
         graph.pruneUnreachableToLoadConsume();
+        graph.pruneUnreachableFromStoreYield();
+    }
+
+    void vdgSimplifyStableReach(VDG &graph)
+    {
+        graph.reduceByStableReachability();
     }
 }
 
@@ -1158,6 +1164,7 @@ void VersionedFlowSensitive::simplifyVDGGraphs(void)
     std::vector<VDGSimplifyPass> passes;
     registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
     registerVDGSimplifyPass(passes, vdgSimplifyPrune);
+    registerVDGSimplifyPass(passes, vdgSimplifyStableReach);
 
     for (Map<NodeID, std::unique_ptr<VDG>>::value_type &entry : vdgGraphs)
     {

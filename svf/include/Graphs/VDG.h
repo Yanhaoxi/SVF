@@ -33,12 +33,14 @@
 
 #include "Util/GeneralType.h"
 #include <cassert>
+#include <iterator>
 #include <string>
 
 namespace SVF
 {
 
 class VDGNode;
+class VDG;
 
 typedef GenericEdge<VDGNode> GenericVDGEdgeTy;
 
@@ -54,7 +56,8 @@ public:
         IndCallFlow = 1 << 2
     };
 
-    typedef GenericNode<VDGNode, VDGEdge>::GEdgeSetTy VDGEdgeSetTy;
+    // NOTE: equalGEdge must be defined BEFORE VDGEdgeSetTy to ensure
+    // GenericNode uses this comparator instead of the base class version
     typedef struct equalGEdge
     {
         bool operator()(const VDGEdge* lhs, const VDGEdge* rhs) const
@@ -65,11 +68,11 @@ public:
         }
     } equalGEdge;
 
-    VDGEdge(VDGNode *src, VDGNode *dst, VDGEdgeK kind, bool isVirtual = false)
-        : GenericVDGEdgeTy(src, dst,
-                           (static_cast<GEdgeFlag>(kind) & KindMask)
-                           | (isVirtual ? VirtualEdgeFlag : 0))
+    typedef GenericNode<VDGNode, VDGEdge>::GEdgeSetTy VDGEdgeSetTy;
+
+    inline bool operator==(const GenericVDGEdgeTy* rhs) const override
     {
+        return rhs && rhs->getSrcID() == getSrcID() && rhs->getDstID() == getDstID();
     }
 
     ~VDGEdge() override = default;
@@ -114,6 +117,15 @@ public:
 protected:
     static constexpr GEdgeFlag VirtualEdgeFlag = (1ULL << (EdgeKindMaskBits - 1));
     static constexpr GEdgeFlag KindMask = VirtualEdgeFlag - 1;
+
+private:
+    friend class VDG;
+    VDGEdge(VDGNode *src, VDGNode *dst, VDGEdgeK kind, bool isVirtual = false)
+        : GenericVDGEdgeTy(src, dst,
+                           (static_cast<GEdgeFlag>(kind) & KindMask)
+                           | (isVirtual ? VirtualEdgeFlag : 0))
+    {
+    }
 };
 
 typedef GenericNode<VDGNode, VDGEdge> GenericVDGNodeTy;
@@ -169,40 +181,6 @@ public:
         storeYield = storeYield || value;
     }
 
-    bool addIncomingEdgeWithKind(VDGEdge* inEdge)
-    {
-        GenericVDGNodeTy::addIncomingEdge(inEdge);
-        if (!inEdge->isVirtualEdge())
-            solidInEdges.insert(inEdge);
-        return true;
-    }
-
-    bool addOutgoingEdgeWithKind(VDGEdge* outEdge)
-    {
-        GenericVDGNodeTy::addOutgoingEdge(outEdge);
-        if (!outEdge->isVirtualEdge())
-            solidOutEdges.insert(outEdge);
-        return true;
-    }
-
-    bool removeIncomingEdgeWithKind(VDGEdge* inEdge)
-    {
-        u32_t num1 = GenericVDGNodeTy::removeIncomingEdge(inEdge);
-        u32_t num2 = (!inEdge->isVirtualEdge() ? solidInEdges.erase(inEdge) : 1);
-        bool removed = (num1 > 0) & (num2 > 0);
-        assert(removed && "edge not in the set, can not remove!!!");
-        return removed;
-    }
-
-    bool removeOutgoingEdgeWithKind(VDGEdge* outEdge)
-    {
-        u32_t num1 = GenericVDGNodeTy::removeOutgoingEdge(outEdge);
-        u32_t num2 = (!outEdge->isVirtualEdge() ? solidOutEdges.erase(outEdge) : 1);
-        bool removed = (num1 > 0) & (num2 > 0);
-        assert(removed && "edge not in the set, can not remove!!!");
-        return removed;
-    }
-
     VDGEdgeSetTy::iterator directOutEdgeBegin() override;
     VDGEdgeSetTy::iterator directOutEdgeEnd() override;
     VDGEdgeSetTy::iterator directInEdgeBegin() override;
@@ -222,27 +200,46 @@ public:
         return node->getNodeKind() == VDGNodeKd;
     }
 
-    inline const VDGEdgeSetTy& getSolidOutEdges() const
-    {
-        return solidOutEdges;
-    }
-
-    inline void addSolidIncomingEdge(VDGEdge* inEdge)
-    {
-        solidInEdges.insert(inEdge);
-    }
-
-    inline void addSolidOutgoingEdge(VDGEdge* outEdge)
-    {
-        solidOutEdges.insert(outEdge);
-    }
-
 private:
+    friend class VDG;
+    using GenericVDGNodeTy::addIncomingEdge;
+    using GenericVDGNodeTy::addOutgoingEdge;
+    using GenericVDGNodeTy::removeIncomingEdge;
+    using GenericVDGNodeTy::removeOutgoingEdge;
+
+    bool addIncomingEdgeWithKind(VDGEdge* inEdge)
+    {
+        bool nondup=GenericVDGNodeTy::addIncomingEdge(inEdge);
+        assert(nondup && "adding duplicate in edge to VDG node!!!");
+        return true;
+    }
+
+    bool addOutgoingEdgeWithKind(VDGEdge* outEdge)
+    {
+        bool nondup=GenericVDGNodeTy::addOutgoingEdge(outEdge);
+        assert(nondup && "adding duplicate out edge to VDG node!!!");
+        return true;
+    }
+
+    bool removeIncomingEdgeWithKind(VDGEdge* inEdge)
+    {
+        u32_t num1 = GenericVDGNodeTy::removeIncomingEdge(inEdge);
+        bool removed = (num1 > 0);
+        assert(removed && "edge not in the set, can not remove!!!");
+        return removed;
+    }
+
+    bool removeOutgoingEdgeWithKind(VDGEdge* outEdge)
+    {
+        u32_t num1 = GenericVDGNodeTy::removeOutgoingEdge(outEdge);
+        bool removed = (num1 > 0);
+        assert(removed && "edge not in the set, can not remove!!!");
+        return removed;
+    }
+
     VersionedVar var;
     bool loadConsume;
     bool storeYield;
-    VDGEdgeSetTy solidInEdges;
-    VDGEdgeSetTy solidOutEdges;
 };
 
 class VDG : public GenericGraph<VDGNode, VDGEdge>
@@ -266,6 +263,8 @@ public:
     void mergeNodesIntoRep(const NodeBS& nodes, VDGNode* rep);
     void sccMergeSolidEdges();
     void pruneUnreachableToLoadConsume();
+    void pruneUnreachableFromStoreYield();
+    void reduceByStableReachability();
 
     VDGNode* getOrAddNode(NodeID obj, Version ver, bool loadConsume = false, bool storeYield = false)
     {
@@ -303,17 +302,14 @@ public:
         {
             edge->addKind(kind);
             if (!isVirtual && edge->isVirtualEdge())
-            {
-                edge->setVirtual(false);
-                src->addSolidOutgoingEdge(edge);
-                dst->addSolidIncomingEdge(edge);
-            }
+                updateEdgeVirtual(edge, false);
             return edge;
         }
 
         edge = new VDGEdge(src, dst, kind, isVirtual);
         src->addOutgoingEdgeWithKind(edge);
         dst->addIncomingEdgeWithKind(edge);
+        logEdgeChange("add", edge);
         return edge;
     }
 
@@ -380,11 +376,14 @@ public:
     }
 
 private:
+    static void logEdgeChange(const char* tag, const VDGEdge* edge);
+    static void logEdgeMembership(const char* tag, const VDGNode* node, const VDGEdge* edge);
+    static void updateEdgeVirtual(VDGEdge* edge, bool isVirtual);
     void reTargetDstOfEdge(VDGEdge* edge, VDGNode* newDst);
     void reTargetSrcOfEdge(VDGEdge* edge, VDGNode* newSrc);
     void removeVDGEdge(VDGEdge* edge);
     void removeNode(VDGNode* node);
-    void moveEdgesToNode(VDGNode* node, VDGNode* rep);
+    void moveEdgesToRep(VDGNode* node, VDGNode* rep);
 
     VDGEdge* findEdge(const VDGNode *src, const VDGNode *dst) const
     {
@@ -404,6 +403,68 @@ private:
 
 namespace SVF
 {
+// Iterates node out-edges with optional virtual-edge filtering (no extra edge sets).
+class VDGChildIter
+{
+public:
+    using EdgeIter = VDGNode::const_iterator;
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = VDGNode*;
+    using difference_type = std::ptrdiff_t;
+    using pointer = value_type*;
+    using reference = value_type;
+
+    VDGChildIter() : cur(), end(), skipVirtual(false) {}
+
+    VDGChildIter(EdgeIter begin, EdgeIter end, bool skipVirtual)
+        : cur(begin), end(end), skipVirtual(skipVirtual)
+    {
+        skipInvalid();
+    }
+
+    value_type operator*() const
+    {
+        assert(cur != end && "Dereferencing end iterator");
+        return (*cur)->getDstNode();
+    }
+
+    VDGChildIter& operator++()
+    {
+        if (cur != end)
+            ++cur;
+        skipInvalid();
+        return *this;
+    }
+
+    bool operator==(const VDGChildIter& rhs) const
+    {
+        return cur == rhs.cur;
+    }
+
+    bool operator!=(const VDGChildIter& rhs) const
+    {
+        return cur != rhs.cur;
+    }
+
+    EdgeIter getCurrent() const
+    {
+        return cur;
+    }
+
+private:
+    EdgeIter cur;
+    EdgeIter end;
+    bool skipVirtual;
+
+    void skipInvalid()
+    {
+        if (!skipVirtual)
+            return;
+        while (cur != end && (*cur)->isVirtualEdge())
+            ++cur;
+    }
+};
+
 template<> struct GenericGraphTraits<SVF::VDGNode*> : public GenericGraphTraits<SVF::GenericNode<SVF::VDGNode,SVF::VDGEdge>*  >
 {
 };
@@ -415,7 +476,25 @@ struct GenericGraphTraits<Inverse<SVF::VDGNode*> > : public GenericGraphTraits<I
 
 template<> struct GenericGraphTraits<SVF::VDG*> : public GenericGraphTraits<SVF::GenericGraph<SVF::VDGNode,SVF::VDGEdge>* >
 {
-    typedef SVF::VDGNode* NodeRef;
+    using NodeRef = SVF::VDGNode*;
+    using ChildIteratorType = VDGChildIter;
+
+    static inline ChildIteratorType child_begin(const VDGNode* N)
+    {
+        return ChildIteratorType(N->OutEdgeBegin(), N->OutEdgeEnd(), false);
+    }
+    static inline ChildIteratorType child_end(const VDGNode* N)
+    {
+        return ChildIteratorType(N->OutEdgeEnd(), N->OutEdgeEnd(), false);
+    }
+    static inline ChildIteratorType direct_child_begin(const VDGNode* N)
+    {
+        return ChildIteratorType(N->OutEdgeBegin(), N->OutEdgeEnd(), !SVF::VDG::detectVE());
+    }
+    static inline ChildIteratorType direct_child_end(const VDGNode* N)
+    {
+        return ChildIteratorType(N->OutEdgeEnd(), N->OutEdgeEnd(), !SVF::VDG::detectVE());
+    }
 };
 } // namespace SVF
 
