@@ -30,6 +30,12 @@ void VersionedFlowSensitiveStat::clearStat()
     _AvgPtsSize          = 0.0;
     _AvgTopLvlPtsSize    = 0.0;
     _AvgVersionPtsSize   = 0.0;
+    // Equivalent-object statistics
+    _NumEquivClasses     = 0;
+    _TotalEquivObjs      = 0;
+    _NumSingletonClasses = 0;
+    _MaxEquivClassSize   = 0;
+    _NumExpandedObjs     = 0;
 }
 
 void VersionedFlowSensitiveStat::performStat()
@@ -45,6 +51,7 @@ void VersionedFlowSensitiveStat::performStat()
 
     versionStat();
     ptsSizeStat();
+    equivalentObjStat();
 
     u32_t fiObjNumber = 0;
     u32_t fsObjNumber = 0;
@@ -113,6 +120,12 @@ void VersionedFlowSensitiveStat::performStat()
     PTNumStatMap["TotalEmptyVPts"]    = _NumEmptyVersions;
     PTNumStatMap["TotalExistingVPts"] = _NumUsedVersions;
     PTNumStatMap["TotalSingleVObjs"]  = _NumSingleVersion;
+
+    PTNumStatMap["EquivObjClasses"]    = _NumEquivClasses;
+    PTNumStatMap["TotalEquivObjs"]     = _TotalEquivObjs;
+    PTNumStatMap["SingletonClasses"]   = _NumSingletonClasses;
+    PTNumStatMap["MaxEquivClassSize"]  = _MaxEquivClassSize;
+    PTNumStatMap["ExpandedObjs"]       = _NumExpandedObjs;
 
     PTNumStatMap["CopysNum"]  = numOfCopy;
     PTNumStatMap["StoresNum"] = numOfStore;
@@ -221,4 +234,29 @@ void VersionedFlowSensitiveStat::ptsSizeStat()
     }
 
     _MaxPtsSize = _MaxVersionPtsSize > _MaxTopLvlPtsSize ? _MaxVersionPtsSize : _MaxTopLvlPtsSize;
+}
+
+void VersionedFlowSensitiveStat::equivalentObjStat(void)
+{
+    // Compute equivalent-object class statistics (versioning footprint equivalence classes).
+    Map<NodeID, u32_t> classSizes;
+    for (const Map<NodeID, NodeID>::value_type &kv : vfspta->equivalentObject)
+    {
+        classSizes[kv.second] += 1;
+        // Count non-canonical objects (those that were expanded)
+        if (kv.first != kv.second)
+        {
+            ++_NumExpandedObjs;
+        }
+    }
+
+    _TotalEquivObjs = vfspta->equivalentObject.size();
+    _NumEquivClasses = classSizes.size();
+    _MaxEquivClassSize = 0;
+    _NumSingletonClasses = 0;
+    for (const Map<NodeID, u32_t>::value_type &kv : classSizes)
+    {
+        if (kv.second > _MaxEquivClassSize) _MaxEquivClassSize = kv.second;
+        if (kv.second == 1) ++_NumSingletonClasses;
+    }
 }

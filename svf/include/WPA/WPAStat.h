@@ -187,6 +187,9 @@ private:
     /// For all PTS size related statistics not handled by versionStat.
     void ptsSizeStat(void);
 
+    /// Compute and print equivalent-object class statistics.
+    void equivalentObjStat(void);
+
     /// Total number of versions across all objects.
     u32_t _NumVersions;
     /// Most versions for a single object.
@@ -216,6 +219,17 @@ private:
     double _AvgTopLvlPtsSize;
     /// Average points-to set size for address-taken objects.
     double _AvgVersionPtsSize;
+
+    /// Number of equivalent-object classes.
+    u32_t _NumEquivClasses;
+    /// Total number of objects in equivalentObject map.
+    u32_t _TotalEquivObjs;
+    /// Number of singleton equivalence classes.
+    u32_t _NumSingletonClasses;
+    /// Max size of an equivalence class.
+    u32_t _MaxEquivClassSize;
+    /// Number of non-canonical objects (expanded during expandEquivalentObjectVersions).
+    u32_t _NumExpandedObjs;
 };
 } // End namespace SVF
 

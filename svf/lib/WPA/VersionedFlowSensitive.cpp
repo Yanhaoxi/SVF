@@ -90,6 +90,8 @@ void VersionedFlowSensitive::initialize()
 
     prelabel();
     meldLabel();
+    // 扩充 consume 和 yield，使等价类中的所有对象都有自己的版本条目
+    expandEquivalentObjectVersions();
     buildVersionDependencyGraphs();
     if (Options::DumpVDG())
     {
@@ -478,6 +480,60 @@ void VersionedFlowSensitive::meldLabel(void)
     meldLabelingTime = (end - start) / TIMEINTERVAL;
 }
 
+void VersionedFlowSensitive::expandEquivalentObjectVersions(void)
+{
+    // 将规范对象的版本信息扩展到所有等价类成员
+
+    // 收集需要扩展的对象映射：非规范对象 -> 规范对象
+    std::vector<std::pair<NodeID, NodeID>> toExpand;
+    for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
+    {
+        const NodeID o = kv.first;
+        const NodeID canonObj = kv.second;
+        // 只处理非规范对象（o 映射到其他对象）
+        if (o != canonObj)
+        {
+            toExpand.push_back(std::make_pair(o, canonObj));
+        }
+    }
+
+    // 扩展 consume 映射
+    for (NodeID l = 0; l < consume.size(); ++l)
+    {
+        ObjToVersionMap &consumeMap = consume[l];
+        for (const std::pair<NodeID, NodeID> &oc : toExpand)
+        {
+            const NodeID o = oc.first;
+            const NodeID canonObj = oc.second;
+            // 查找规范对象的版本
+            ObjToVersionMap::const_iterator canonIt = consumeMap.find(canonObj);
+            if (canonIt != consumeMap.end())
+            {
+                // 将规范对象的版本复制给当前对象
+                consumeMap[o] = canonIt->second;
+            }
+        }
+    }
+
+    // 扩展 yield 映射
+    for (NodeID l = 0; l < yield.size(); ++l)
+    {
+        ObjToVersionMap &yieldMap = yield[l];
+        for (const std::pair<NodeID, NodeID> &oc : toExpand)
+        {
+            const NodeID o = oc.first;
+            const NodeID canonObj = oc.second;
+            // 查找规范对象的版本
+            ObjToVersionMap::const_iterator canonIt = yieldMap.find(canonObj);
+            if (canonIt != yieldMap.end())
+            {
+                // 将规范对象的版本复制给当前对象
+                yieldMap[o] = canonIt->second;
+            }
+        }
+    }
+}
+
 bool VersionedFlowSensitive::meld(MeldVersion &mv1, const MeldVersion &mv2)
 {
     // Meld operator is union of bit vectors.
@@ -856,11 +912,12 @@ void VersionedFlowSensitive::cluster(void)
 
 Version VersionedFlowSensitive::getVersion(const NodeID l, const NodeID o, const LocVersionMap &lvm) const
 {
-    const Map<NodeID, NodeID>::const_iterator canonObjectIt = equivalentObject.find(o);
-    const NodeID op = canonObjectIt == equivalentObject.end() ? o : canonObjectIt->second;
-
+    // const Map<NodeID, NodeID>::const_iterator canonObjectIt = equivalentObject.find(o);
+    // const NodeID op = canonObjectIt == equivalentObject.end() ? o : canonObjectIt->second;
+    // 经过 expandEquivalentObjectVersions() 扩展后，所有对象都有自己的版本条目无需再通过 equivalentObject 查找规范对象
     const ObjToVersionMap &ovm = lvm[l];
-    const ObjToVersionMap::const_iterator foundVersion = ovm.find(op);
+    // const ObjToVersionMap::const_iterator foundVersion = ovm.find(op);
+    const ObjToVersionMap::const_iterator foundVersion = ovm.find(o);
     return foundVersion == ovm.end() ? invalidVersion : foundVersion->second;
 }
 
@@ -997,6 +1054,9 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
         NodeBS cpts = srcMR->getPointsTo();
         if (!cpts.intersects(dstMR->getPointsTo())) return;
         cpts &= dstMR->getPointsTo();
+        
+        assert(delta(dstId) && "VFS::updateConnectedNodes: new edges should be to delta nodes!");
+        assert(deltaSource(srcId) && "VFS::updateConnectedNodes: new indirect edges should be from delta source nodes!");
 
         for (const NodeID o : cpts)
         {

@@ -196,6 +196,7 @@ private:
     /// Sets the yielded version of o at l to v.
     void setYield(const NodeID l, const NodeID o, const Version v);
 
+    void expandEquivalentObjectVersions(void);
     void buildVersionDependencyGraphs(void);
     void simplifyVDGGraphs(void);
     void writeVersionDependencyGraphs(const std::string& filename,
