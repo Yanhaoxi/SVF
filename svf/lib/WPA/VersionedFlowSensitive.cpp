@@ -90,7 +90,6 @@ void VersionedFlowSensitive::initialize()
 
     prelabel();
     meldLabel();
-    // 扩充 consume 和 yield，使等价类中的所有对象都有自己的版本条目
     expandEquivalentObjectVersions();
     buildVersionDependencyGraphs();
     if (Options::DumpVDG())
@@ -103,10 +102,17 @@ void VersionedFlowSensitive::initialize()
     if (Options::VDGStat())
         dumpVDGStats(vdgGraphs);
     simplifyVDGGraphs();
+    if (Options::DumpVDG())
+    {
+        std::string outName = Options::VDGOutput();
+        if (outName.empty())
+            outName = "vfs_vdg_simplified";
+        drawVersionDependencyGraph(outName);
+    }
     if (Options::VDGStat())
         dumpVDGStats(vdgGraphs);
     
-
+    remapVersionsByVDG();
     removeAllIndirectSVFGEdges();
 }
 
@@ -744,11 +750,16 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
                 Version dstC = getConsume(dst, o);
                 if (dstC == invalidVersion) continue;
 
-                std::vector<Version> &versionsRelyingOnSrcY = getReliantVersions(o, srcY);
-                if (std::find(versionsRelyingOnSrcY.begin(), versionsRelyingOnSrcY.end(), dstC) == versionsRelyingOnSrcY.end())
+                //间接调用触发 加入依赖边
+                Map<NodeID, std::unique_ptr<VDG>>::iterator graphIt = vdgGraphs.find(o);
+                if (graphIt != vdgGraphs.end() && graphIt->second)
                 {
-                    versionsRelyingOnSrcY.push_back(dstC);
-                    propagateVersion(o, srcY, dstC);
+                    VDG &graph = *graphIt->second;
+                    VDGNode *srcNode = graph.getOrAddNode(o, srcY, false, false);
+                    VDGNode *dstNode = graph.getOrAddNode(o, dstC, false, false);
+                    if(graph.addVDGEdge(srcNode, dstNode, VDGEdge::IndCallFlow, false)){
+                        propagateVersion(o, srcY, dstC);
+                    }
                 }
             }
         }
@@ -819,6 +830,12 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
     bool changed = false;
     // The version for these objects would be y_l(o).
     NodeBS changedObjects;
+    auto getGraph = [&](const NodeID o) -> VDG&
+    {
+        std::unique_ptr<VDG> &graph = vdgGraphs[o];
+        assert(graph != nullptr && "VFS::processStore: VDG should have been created for this object during prelabeling!");
+        return *graph;
+    };
 
     if (!qpt.empty())
     {
@@ -860,31 +877,19 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
         if (isSU && o == singleton) continue;
 
         const Version y = getYield(l, o);
-        if (y != invalidVersion && vPtD->unionPts(atKey(o, y), atKey(o, c)))
+        if (y != invalidVersion)
         {
-            changed = true;
-            changedObjects.set(o);
+            VDG &graph = getGraph(o);
+            VDGNode *src = graph.getOrAddNode(o, c, false, false);
+            VDGNode *dst = graph.getOrAddNode(o, y, false, true);
+            if(graph.addVDGEdge(src, dst, VDGEdge::StoreFlow, false)){
+                propagateVersion(o, c, y);
+            }
         }
     }
 
     double updateEnd = stat->getClk();
     updateTime += (updateEnd - updateStart) / TIMEINTERVAL;
-
-    // Changed objects need to be propagated. Time here should be inconsequential
-    // *except* for time taken for propagateVersion, which will time itself.
-    if (!changedObjects.empty())
-    {
-        for (const NodeID o : changedObjects)
-        {
-            // Definitely has a yielded version (came from prelabelling) as these are
-            // the changed objects which must've been pointed to in Andersen's too.
-            const Version y = getYield(l, o);
-            propagateVersion(o, y);
-
-            // Some o/v pairs changed: statements need to know.
-            for (NodeID s : getStmtReliance(o, y)) pushIntoWorklist(s);
-        }
-    }
 
     return changed;
 }
@@ -951,9 +956,30 @@ void VersionedFlowSensitive::setYield(const NodeID l, const NodeID o, const Vers
     else setVersion(l, o, v, consume);
 }
 
-std::vector<Version> &VersionedFlowSensitive::getReliantVersions(const NodeID o, const Version v)
+std::vector<Version> VersionedFlowSensitive::getReliantVersions(const NodeID o, const Version v) const
 {
-    return versionReliance[o][v];
+    std::vector<Version> result;
+    
+    // 从 VDG 查询依赖的版本
+    Map<NodeID, std::unique_ptr<VDG>>::const_iterator graphIt = vdgGraphs.find(o);
+    if (graphIt == vdgGraphs.end() || !graphIt->second)
+        return result;
+    
+    const VDG &graph = *graphIt->second;
+    const VDGNode *node = graph.getNode(std::make_pair(o, v));
+    if (!node)
+        return result;
+    
+    // 遍历 solid out edge，收集后继节点的版本
+    for (VDGNode::const_iterator it = node->OutEdgeBegin(); it != node->OutEdgeEnd(); ++it)
+    {
+        const VDGEdge *edge = *it;
+        if (edge->isVirtualEdge())
+            continue;
+        result.push_back(edge->getDstNode()->getVersion());
+    }
+    
+    return result;
 }
 
 NodeBS &VersionedFlowSensitive::getStmtReliance(const NodeID o, const Version v)
@@ -1234,6 +1260,103 @@ void VersionedFlowSensitive::simplifyVDGGraphs(void)
         for (VDGSimplifyPass pass : passes)
             pass(graph);
     }
+}
+
+void VersionedFlowSensitive::remapVersionsByVDG(void)
+{
+    // 根据 VDG 简化结果重映射版本：
+    // 1. consume/yield: sub->rep 映射，不在图中的删除
+    // 2. stmtReliance: sub 合并到 rep
+    // 3. versionReliance: 清空，改为使用 VDG 查询
+
+    // 辅助函数：获取版本对应的代表版本
+    auto getRepVersion = [this](const NodeID o, const Version v) -> Version
+    {
+        auto graphIt = vdgGraphs.find(o);
+        if (graphIt == vdgGraphs.end() || !graphIt->second)
+            return invalidVersion;
+        
+        VDG &graph = *graphIt->second;
+        VDGNode *node = graph.getNode(std::make_pair(o, v));
+        if (!node)
+            return invalidVersion;
+        
+        // 获取代表节点
+        NodeID repId = graph.getRep(node->getId());
+        VDGNode *repNode = graph.getGNode(repId);
+        return repNode ? repNode->getVersion() : invalidVersion;
+    };
+
+    // 1. 重映射 consume
+    for (NodeID l = 0; l < consume.size(); ++l)
+    {
+        ObjToVersionMap &consumeMap = consume[l];
+        ObjToVersionMap newConsumeMap;
+        
+        for (const ObjToVersionMap::value_type &ov : consumeMap)
+        {
+            const NodeID o = ov.first;
+            const Version v = ov.second;
+            if (v == invalidVersion) continue;
+            
+            Version repV = getRepVersion(o, v);
+            if (repV != invalidVersion)
+            {
+                newConsumeMap[o] = repV;
+            }
+            // 如果 repV == invalidVersion，说明不在图中，删除（不加入新 map）
+        }
+        
+        consumeMap = std::move(newConsumeMap);
+    }
+
+    // 2. 重映射 yield
+    for (NodeID l = 0; l < yield.size(); ++l)
+    {
+        ObjToVersionMap &yieldMap = yield[l];
+        ObjToVersionMap newYieldMap;
+        
+        for (const ObjToVersionMap::value_type &ov : yieldMap)
+        {
+            const NodeID o = ov.first;
+            const Version v = ov.second;
+            if (v == invalidVersion) continue;
+            
+            Version repV = getRepVersion(o, v);
+            if (repV != invalidVersion)
+            {
+                newYieldMap[o] = repV;
+            }
+        }
+        
+        yieldMap = std::move(newYieldMap);
+    }
+
+    // 3. 重映射 stmtReliance: 将 sub 版本的语句合并到 rep 版本
+    for (Map<NodeID, Map<Version, NodeBS>>::value_type &ovs : stmtReliance)
+    {
+        const NodeID o = ovs.first;
+        Map<Version, NodeBS> &versionToStmts = ovs.second;
+        Map<Version, NodeBS> newVersionToStmts;
+        
+        for (const Map<Version, NodeBS>::value_type &vs : versionToStmts)
+        {
+            const Version v = vs.first;
+            const NodeBS &stmts = vs.second;
+            
+            Version repV = getRepVersion(o, v);
+            if (repV != invalidVersion)
+            {
+                // 合并到代表版本
+                newVersionToStmts[repV] |= stmts;
+            }
+        }
+        
+        versionToStmts = std::move(newVersionToStmts);
+    }
+
+    // 4. 清空 versionReliance，后续使用 VDG 查询
+    versionReliance.clear();
 }
 
 void VersionedFlowSensitive::dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>> &graphs) const

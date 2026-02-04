@@ -128,8 +128,8 @@ public:
     /// Returns the yielded version of o at l. If no such version exists, returns invalidVersion.
     Version getYield(const NodeID l, const NodeID o) const;
 
-    /// Returns the versions of o which rely on o:v.
-    std::vector<Version> &getReliantVersions(const NodeID o, const Version v);
+    /// Returns the versions of o which rely on o:v (queried from VDG).
+    std::vector<Version> getReliantVersions(const NodeID o, const Version v) const;
 
     /// Returns the statements which rely on o:v.
     NodeBS &getStmtReliance(const NodeID o, const Version v);
@@ -199,6 +199,7 @@ private:
     void expandEquivalentObjectVersions(void);
     void buildVersionDependencyGraphs(void);
     void simplifyVDGGraphs(void);
+    void remapVersionsByVDG(void);
     void writeVersionDependencyGraphs(const std::string& filename,
                                       const Map<NodeID, std::unique_ptr<VDG>> &graphs) const;
     void dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>> &graphs) const;

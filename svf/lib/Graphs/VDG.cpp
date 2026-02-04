@@ -147,11 +147,17 @@ inline void VDG::logEdgeMembership(const char* tag, const VDGNode* node, const V
 #endif
 }
 
-void VDG::updateEdgeVirtual(VDGEdge* edge, bool isVirtual)
+bool VDG::updateEdgeVirtual(VDGEdge* edge, bool isVirtual)
 {
-    if (edge == nullptr || edge->isVirtualEdge() == isVirtual)
-        return;
+    assert(edge && "VDG edge to be updated is null!");
+    const bool wasVirtual = edge->isVirtualEdge();
+    // non change
+    if (wasVirtual == isVirtual)
+        return false;
+    // change
     edge->setVirtual(isVirtual);
+    // virtual -> solid
+    return wasVirtual && !isVirtual;
 }
 
 void VDG::reTargetDstOfEdge(VDGEdge* edge, VDGNode* newDst)

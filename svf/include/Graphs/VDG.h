@@ -294,7 +294,8 @@ public:
         return nodeMap;
     }
 
-    VDGEdge* addVDGEdge(VDGNode *src, VDGNode *dst, VDGEdge::VDGEdgeK kind, bool isVirtual)
+    // return true if a non-virtual edge is added or an existing virtual edge is updated to non-virtual
+    bool addVDGEdge(VDGNode *src, VDGNode *dst, VDGEdge::VDGEdgeK kind, bool isVirtual)
     {
         assert(src != dst && "VDG edge should not be a self-loop");
         VDGEdge *edge = findEdge(src, dst);
@@ -302,15 +303,16 @@ public:
         {
             edge->addKind(kind);
             if (!isVirtual && edge->isVirtualEdge())
-                updateEdgeVirtual(edge, false);
-            return edge;
+            {
+                return updateEdgeVirtual(edge, false); 
+            }
+            return false;
         }
-
         edge = new VDGEdge(src, dst, kind, isVirtual);
         src->addOutgoingEdgeWithKind(edge);
         dst->addIncomingEdgeWithKind(edge);
         logEdgeChange("add", edge);
-        return edge;
+        return !isVirtual;
     }
 
     inline NodeID sccRepNode(NodeID id) const
@@ -378,7 +380,7 @@ public:
 private:
     static void logEdgeChange(const char* tag, const VDGEdge* edge);
     static void logEdgeMembership(const char* tag, const VDGNode* node, const VDGEdge* edge);
-    static void updateEdgeVirtual(VDGEdge* edge, bool isVirtual);
+    static bool updateEdgeVirtual(VDGEdge* edge, bool isVirtual);
     void reTargetDstOfEdge(VDGEdge* edge, VDGNode* newDst);
     void reTargetSrcOfEdge(VDGEdge* edge, VDGNode* newSrc);
     void removeVDGEdge(VDGEdge* edge);
