@@ -27,6 +27,7 @@
  *      Author: Yulei Sui
  */
 
+#include "Graphs/SVFG.h"
 #include "Util/Options.h"
 #include "WPA/WPAStat.h"
 #include "WPA/FlowSensitive.h"
@@ -80,7 +81,7 @@ void FlowSensitive::solveConstraints()
     double start = stat->getClk(true);
     /// Start solving constraints
     DBOUT(DGENERAL, outs() << SVFUtil::pasMsg("Start Solving Constraints\n"));
-
+    initWorklist();
     do
     {
         numOfIteration++;
@@ -90,7 +91,7 @@ void FlowSensitive::solveConstraints()
 
         callGraphSCC->find();
 
-        initWorklist();
+        // initWorklist();
         solveWorklist();
     }
     while (updateCallGraph(getIndirectCallsites()));
@@ -764,11 +765,15 @@ void FlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& edges)
     for (const SVFGEdge* edge : edges)
     {
         SVFGNode* dstNode = edge->getDstNode();
-        if (SVFUtil::isa<PHISVFGNode>(dstNode))
+        SVFGNode* srcNode = edge->getSrcNode();
+        if (SVFUtil::isa<PHISVFGNode>(dstNode)
+                || SVFUtil::isa<FormalParmSVFGNode>(dstNode)
+                || SVFUtil::isa<ActualRetSVFGNode>(dstNode))
         {
-            /// If this is a formal-param or actual-ret node, we need to solve this phi
-            /// node in next iteration
-            pushIntoWorklist(dstNode->getId());
+            /// Push src so that when src is processed, its propagate() will:
+            /// 1. For AP->FP/FR->AR: call propagateFromAPToFP/propagateFromFRToAR to push pts
+            /// 2. For other direct edges: return true to push dst (PHI) into worklist
+            pushIntoWorklist(srcNode->getId());
         }
         else if (SVFUtil::isa<FormalINSVFGNode, ActualOUTSVFGNode>(dstNode))
         {

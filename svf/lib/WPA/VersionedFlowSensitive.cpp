@@ -38,18 +38,29 @@ namespace
 
     void vdgSimplifySCCMerge(VDG &graph)
     {
-        graph.sccMergeSolidEdges();
+        (void)graph.sccMergeSolidEdges();
     }
 
-    void vdgSimplifyPrune(VDG &graph)
-    {
-        graph.pruneUnreachableToLoadConsume();
-        graph.pruneUnreachableFromStoreYield();
-    }
+    // void vdgSimplifyPrune(VDG &graph)
+    // {
+    //     graph.pruneUnreachableToLoadConsume();
+    //     graph.pruneUnreachableFromStoreYield();
+    // }
 
     void vdgSimplifyStableReach(VDG &graph)
     {
-        graph.reduceByStableReachability();
+        graph.reduceByStableDstReachability();
+        graph.reduceByStableSrcReachability();
+    }
+
+    void vdgSimplifyChainContraction(VDG &graph)
+    {
+        graph.chainContraction();
+    }
+
+    void vdgSimplifyTransRedundancy(VDG &graph)
+    {
+        graph.transitiveRedundancyElimination();
     }
 }
 
@@ -95,8 +106,7 @@ void VersionedFlowSensitive::initialize()
     if (Options::DumpVDG())
     {
         std::string outName = Options::VDGOutput();
-        if (outName.empty())
-            outName = "vfs_vdg_init";
+        outName += "_init";
         drawVersionDependencyGraph(outName);
     }
     if (Options::VDGStat())
@@ -105,8 +115,7 @@ void VersionedFlowSensitive::initialize()
     if (Options::DumpVDG())
     {
         std::string outName = Options::VDGOutput();
-        if (outName.empty())
-            outName = "vfs_vdg_simplified";
+        outName += "_simplified";
         drawVersionDependencyGraph(outName);
     }
     if (Options::VDGStat())
@@ -125,8 +134,7 @@ void VersionedFlowSensitive::finalize()
     if (Options::DumpVDG())
     {
         std::string outName = Options::VDGOutput();
-        if (outName.empty())
-            outName = "vfs_vdg_final";
+        outName += "_final";
         drawVersionDependencyGraph(outName);
     }
 }
@@ -697,7 +705,10 @@ void VersionedFlowSensitive::propagateVersion(const NodeID o, const Version v, c
         pushIntoWorklist(dvp->getId());
 
         // Notify nodes which rely on o:vp that it changed.
-        for (NodeID s : getStmtReliance(o, vp)) pushIntoWorklist(s);
+        for (NodeID s : getStmtReliance(o, vp))
+        {
+            pushIntoWorklist(s);
+        }
     }
 
     double end = time ? stat->getClk() : 0.0;
@@ -723,15 +734,19 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
 {
     for (const SVFGEdge *e : newEdges)
     {
+        SVFGNode *srcNode = e->getSrcNode();
         SVFGNode *dstNode = e->getDstNode();
-        NodeID src = e->getSrcNode()->getId();
+        NodeID src = srcNode->getId();
         NodeID dst = dstNode->getId();
 
         if (SVFUtil::isa<PHISVFGNode>(dstNode)
                 || SVFUtil::isa<FormalParmSVFGNode>(dstNode)
                 || SVFUtil::isa<ActualRetSVFGNode>(dstNode))
         {
-            pushIntoWorklist(dst);
+            /// Push src so that when src is processed, its propagate() will:
+            /// 1. For AP->FP/FR->AR: call propagateFromAPToFP/propagateFromFRToAR to push pts
+            /// 2. For PHI dst: propAlongDirectEdge returns true, pushing dst into worklist
+            pushIntoWorklist(src);
         }
         else
         {
@@ -749,15 +764,16 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
                 if (srcY == invalidVersion) continue;
                 Version dstC = getConsume(dst, o);
                 if (dstC == invalidVersion) continue;
+                if(srcY==dstC) continue; // no self-loop
 
-                //间接调用触发 加入依赖边
+                // 间接调用触发，加入依赖边
                 Map<NodeID, std::unique_ptr<VDG>>::iterator graphIt = vdgGraphs.find(o);
                 if (graphIt != vdgGraphs.end() && graphIt->second)
                 {
                     VDG &graph = *graphIt->second;
-                    VDGNode *srcNode = graph.getOrAddNode(o, srcY, false, false);
-                    VDGNode *dstNode = graph.getOrAddNode(o, dstC, false, false);
-                    if(graph.addVDGEdge(srcNode, dstNode, VDGEdge::IndCallFlow, false)){
+                    VDGNode *vdgSrc = graph.getOrAddNode(o, srcY, false, false);
+                    VDGNode *vdgDst = graph.getOrAddNode(o, dstC, false, false);
+                    if(graph.addVDGEdge(vdgSrc, vdgDst, VDGEdge::IndCallFlow, false)){
                         propagateVersion(o, srcY, dstC);
                     }
                 }
@@ -827,9 +843,6 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
     // l: *p = q
 
     double start = stat->getClk();
-    bool changed = false;
-    // The version for these objects would be y_l(o).
-    NodeBS changedObjects;
     auto getGraph = [&](const NodeID o) -> VDG&
     {
         std::unique_ptr<VDG> &graph = vdgGraphs[o];
@@ -849,8 +862,13 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
                 const Version y = getYield(l, o);
                 if (y != invalidVersion && vPtD->unionPts(atKey(o, y), q))
                 {
-                    changed = true;
-                    changedObjects.set(o);
+                    // Notify statements (loads/stores) that rely on this yield version
+                    for (NodeID s : getStmtReliance(o, y))
+                    {
+                        pushIntoWorklist(s);
+                    }
+                    // Propagate to dependent versions through VDG edges
+                    propagateVersion(o, y);
                 }
             }
         }
@@ -879,6 +897,7 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
         const Version y = getYield(l, o);
         if (y != invalidVersion)
         {
+            if(c==y) continue; // no self-loop
             VDG &graph = getGraph(o);
             VDGNode *src = graph.getOrAddNode(o, c, false, false);
             VDGNode *dst = graph.getOrAddNode(o, y, false, true);
@@ -891,7 +910,7 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
     double updateEnd = stat->getClk();
     updateTime += (updateEnd - updateStart) / TIMEINTERVAL;
 
-    return changed;
+    return false;
 }
 
 void VersionedFlowSensitive::cluster(void)
@@ -1249,8 +1268,9 @@ void VersionedFlowSensitive::simplifyVDGGraphs(void)
 {
     std::vector<VDGSimplifyPass> passes;
     registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
-    registerVDGSimplifyPass(passes, vdgSimplifyPrune);
     registerVDGSimplifyPass(passes, vdgSimplifyStableReach);
+    registerVDGSimplifyPass(passes, vdgSimplifyTransRedundancy);
+    registerVDGSimplifyPass(passes, vdgSimplifyChainContraction);
 
     for (Map<NodeID, std::unique_ptr<VDG>>::value_type &entry : vdgGraphs)
     {

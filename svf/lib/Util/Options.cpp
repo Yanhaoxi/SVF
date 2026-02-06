@@ -234,7 +234,7 @@ const Option<u32_t> Options::VDGMaxNodes(
 const Option<std::string> Options::VDGOutput(
     "vdg-out",
     "Output filename/template for VDG (use %o when split by object)",
-    ""
+    "vdg"
 );
 
 Option<bool> Options::DetectVE(

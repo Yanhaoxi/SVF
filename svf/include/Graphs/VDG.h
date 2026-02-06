@@ -35,6 +35,7 @@
 #include <cassert>
 #include <iterator>
 #include <string>
+#include <vector>
 
 namespace SVF
 {
@@ -261,10 +262,13 @@ public:
     void dump(const std::string& filename);
     void view();
     void mergeNodesIntoRep(const NodeBS& nodes, VDGNode* rep);
-    void sccMergeSolidEdges();
+    std::vector<NodeID> sccMergeSolidEdges();
     void pruneUnreachableToLoadConsume();
     void pruneUnreachableFromStoreYield();
-    void reduceByStableReachability();
+    void reduceByStableDstReachability();
+    void reduceByStableSrcReachability();
+    void chainContraction();
+    void transitiveRedundancyElimination();
 
     VDGNode* getOrAddNode(NodeID obj, Version ver, bool loadConsume = false, bool storeYield = false)
     {
