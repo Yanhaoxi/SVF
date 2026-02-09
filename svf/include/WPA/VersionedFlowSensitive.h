@@ -39,7 +39,6 @@ private:
 
 public:
     typedef Map<NodeID, Version> ObjToVersionMap;
-    typedef Map<VersionedVar, const DummyVersionPropSVFGNode *> VarToPropNodeMap;
 
     typedef std::vector<ObjToVersionMap> LocVersionMap;
     /// (o -> (v -> versions with rely on o:v).
@@ -103,7 +102,7 @@ protected:
     virtual void processNode(NodeID n) override;
     virtual void updateConnectedNodes(const SVFGEdgeSetTy& newEdges) override;
 
-    /// Override to do nothing. Instead, we will use propagateVersion when necessary.
+    /// Override to do nothing. Version propagation is handled via batch propagation on VDG.
     virtual bool propAlongIndirectEdge(const IndirectSVFGEdge*) override
     {
         return false;
@@ -127,9 +126,6 @@ public:
 
     /// Returns the yielded version of o at l. If no such version exists, returns invalidVersion.
     Version getYield(const NodeID l, const NodeID o) const;
-
-    /// Returns the versions of o which rely on o:v (queried from VDG).
-    std::vector<Version> getReliantVersions(const NodeID o, const Version v) const;
 
     /// Returns the statements which rely on o:v.
     NodeBS &getStmtReliance(const NodeID o, const Version v);
@@ -164,15 +160,6 @@ private:
     /// Removes all indirect edges in the SVFG.
     void removeAllIndirectSVFGEdges(void);
 
-    /// Propagates version v of o to any version of o which relies on v when o/v is changed.
-    /// Recursively applies to reliant versions till no new changes are made.
-    /// Adds any statements which rely on any changes made to the worklist.
-    void propagateVersion(NodeID o, Version v);
-
-    /// Propagates version v of o to version vp of o. time indicates whether it should record time
-    /// taken itself.
-    void propagateVersion(const NodeID o, const Version v, const Version vp, bool time=true);
-
     /// Fills in isStoreMap and isLoadMap.
     virtual void buildIsStoreLoadMaps(void);
 
@@ -199,14 +186,17 @@ private:
     void expandEquivalentObjectVersions(void);
     void buildVersionDependencyGraphs(void);
     void simplifyVDGGraphs(void);
-    void remapVersionsByVDG(void);
-    void writeVersionDependencyGraphs(const std::string& filename,
-                                      const Map<NodeID, std::unique_ptr<VDG>> &graphs) const;
-    void dumpVDGStats(const Map<NodeID, std::unique_ptr<VDG>> &graphs) const;
-    inline const Map<NodeID, std::unique_ptr<VDG>>& getVDGGraphs() const
+    
+    inline VDGManager& getVDGManager()
     {
-        return vdgGraphs;
+        return vdgManager;
     }
+
+    /// Override solveWorklist to use batch version propagation
+    virtual void solveWorklist() override;
+
+    /// Propagate versions batch-wise on all updated VDGs
+    void propagateAllVersions();
 
     /// Maps locations to objects to a version. The object version is what is
     /// consumed at that location.
@@ -214,17 +204,13 @@ private:
     /// Actual yield map. Yield analogue to consume.
     LocVersionMap yield;
 
-    /// Version dependency graph(s), keyed by object when split by object.
-    Map<NodeID, std::unique_ptr<VDG>> vdgGraphs;
+    /// Version dependency graph manager
+    VDGManager vdgManager;
 
     /// o -> (version -> versions which rely on it).
     VersionRelianceMap versionReliance;
     /// o x version -> statement nodes which rely on that o/version.
     Map<NodeID, Map<Version, NodeBS>> stmtReliance;
-
-    /// Maps an <object, version> pair to the SVFG node indicating that pair
-    /// needs to be propagated.
-    VarToPropNodeMap versionedVarToPropNode;
 
     // Maps an object o to o' if o is equivalent to o' with respect to
     // versioning. Thus, we don't need to store the versions of o and look

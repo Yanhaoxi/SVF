@@ -30,10 +30,14 @@
 #define VDG_H_
 
 #include "Graphs/GenericGraph.h"
-
 #include "Util/GeneralType.h"
+#include "Util/WorkList.h"
+#include <algorithm>
 #include <cassert>
+#include <functional>
 #include <iterator>
+#include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -42,6 +46,13 @@ namespace SVF
 
 class VDGNode;
 class VDG;
+
+//===----------------------------------------------------------------------===//
+// Type Aliases for VDG
+//===----------------------------------------------------------------------===//
+typedef Map<Version, Version> VersionRepMap;       ///< sub version -> rep version
+typedef Map<Version, VersionSet> VersionSubMap;    ///< rep version -> {all sub versions}
+typedef Map<Version, VDGNode*> VersionToNodeMap;   ///< version -> VDGNode* (always rep after merge)
 
 typedef GenericEdge<VDGNode> GenericVDGEdgeTy;
 
@@ -136,30 +147,21 @@ class VDGNode : public GenericVDGNodeTy
 public:
     typedef GenericVDGNodeTy::GEdgeSetTy VDGEdgeSetTy;
 
-    VDGNode(NodeID id, NodeID obj, Version ver, bool loadConsume = false, bool storeYield = false,
+    VDGNode(NodeID id, Version ver, bool loadConsume = false, bool storeYield = false,
             GNodeK k = VDGNodeKd)
         : GenericVDGNodeTy(id, k),
-          var(std::make_pair(obj, ver)),
+          version(ver),
           loadConsume(loadConsume),
-          storeYield(storeYield)
+          storeYield(storeYield),
+          mergedCount(1)  // Initially represents 1 version (itself)
     {
     }
 
     ~VDGNode() override = default;
 
-    inline NodeID getObject() const
-    {
-        return var.first;
-    }
-
     inline Version getVersion() const
     {
-        return var.second;
-    }
-
-    inline const VersionedVar& getVersionedVar() const
-    {
-        return var;
+        return version;
     }
 
     inline bool isLoadConsume() const
@@ -180,6 +182,18 @@ public:
     inline void setStoreYield(bool value = true)
     {
         storeYield = storeYield || value;
+    }
+
+    /// Get number of versions merged into this rep node
+    inline u32_t getMergedCount() const
+    {
+        return mergedCount;
+    }
+
+    /// Increment merged count when merging another version
+    inline void incrementMergedCount(u32_t count = 1)
+    {
+        mergedCount += count;
     }
 
     VDGEdgeSetTy::iterator directOutEdgeBegin() override;
@@ -238,19 +252,21 @@ private:
         return removed;
     }
 
-    VersionedVar var;
+    Version version;
     bool loadConsume;
     bool storeYield;
+    u32_t mergedCount;  ///< Number of versions merged into this rep node
 };
 
 class VDG : public GenericGraph<VDGNode, VDGEdge>
 {
 public:
-    typedef Map<VersionedVar, VDGNode*> VDGNodeMapTy;
-    typedef Map<NodeID, NodeID> NodeToRepMap;
-    typedef Map<NodeID, NodeBS> NodeToSubsMap;
+    /// Callback type for version propagation: (srcVersion, dstVersion) -> bool (changed)
+    typedef std::function<bool(Version, Version)> PropagateCallback;
+    /// Callback type for notifying statement reliance: (version) -> void
+    typedef std::function<void(Version)> StmtRelianceCallback;
 
-    VDG() : nextNodeId(0)
+    explicit VDG(NodeID obj) : objId(obj), nextNodeId(0)
     {
     }
 
@@ -259,10 +275,12 @@ public:
     static void setDetectVE(bool flag);
     static bool detectVE();
 
+    /// Get the object ID this VDG belongs to
+    inline NodeID getObjId() const { return objId; }
+
     void dump(const std::string& filename);
     void view();
-    void mergeNodesIntoRep(const NodeBS& nodes, VDGNode* rep);
-    std::vector<NodeID> sccMergeSolidEdges();
+    void mergeVersionsIntoRep(const VersionSet& versions, Version repVer);
     void pruneUnreachableToLoadConsume();
     void pruneUnreachableFromStoreYield();
     void reduceByStableDstReachability();
@@ -270,36 +288,174 @@ public:
     void chainContraction();
     void transitiveRedundancyElimination();
 
-    VDGNode* getOrAddNode(NodeID obj, Version ver, bool loadConsume = false, bool storeYield = false)
+    /// Mark a version as updated (stores rep node ID)
+    inline void markVersionUpdated(Version v)
     {
-        const VersionedVar key = std::make_pair(obj, ver);
-        VDGNodeMapTy::iterator it = nodeMap.find(key);
-        if (it != nodeMap.end())
+        VDGNode* node = getNode(v);  // versionMap already returns rep node
+        updatedNodes.insert(node->getId());
+    }
+
+    /// Clear all update markers after propagation
+    inline void clearUpdateMarkers()
+    {
+        updatedNodes.clear();
+    }
+
+    /// Check if there are any pending updates
+    inline bool hasPendingUpdates() const
+    {
+        return !updatedNodes.empty();
+    }
+
+    /// Get updated node IDs set
+    inline const NodeSet& getUpdatedNodes() const
+    {
+        return updatedNodes;
+    }
+
+    /// SCC merge on solid edges and compute topological order
+    /// @param candidates: if non-empty, only traverse from these node IDs; otherwise traverse all
+    /// @return topological order of SCC rep node IDs
+    NodeVector sccMergeSolidEdges(NodeSet candidates = NodeSet());
+
+    //===--- Version Propagation API ---===//
+
+    /// Propagate points-to along solid edges in topological order
+    /// @param propagate: callback(srcVersion, dstVersion) returns true if pts changed
+    /// @param onVersionChanged: callback(version) called when a version's pts changes
+    void propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback onVersionChanged);
+
+    //===--- Node Operations ---===//
+
+    VDGNode* getOrAddNode(Version ver, bool loadConsume = false, bool storeYield = false)
+    {
+        auto it = versionMap.find(ver);
+        if (it != versionMap.end())
         {
             if (loadConsume) it->second->setLoadConsume(true);
             if (storeYield) it->second->setStoreYield(true);
             return it->second;
         }
 
-        VDGNode *node = new VDGNode(nextNodeId++, obj, ver, loadConsume, storeYield);
+        VDGNode *node = new VDGNode(nextNodeId++, ver, loadConsume, storeYield);
         addGNode(node->getId(), node);
-        nodeMap[key] = node;
+        versionMap[ver] = node;
+        
+        // Initialize in subMap: each new version is its own rep with itself as sole sub
+        subMap[ver].insert(ver);
+        
+        // Expand superNodes vector if needed and mark as super
+        if (node->getId() >= superNodes.size())
+            superNodes.resize(node->getId() + 1, false);
+        superNodes[node->getId()] = true;
+        
         return node;
     }
 
-    VDGNode* getNode(const VersionedVar &var) const
+    /// Get node by version (always returns rep node after merge)
+    inline VDGNode* getNode(Version ver)
     {
-        VDGNodeMapTy::const_iterator it = nodeMap.find(var);
-        return it == nodeMap.end() ? nullptr : it->second;
+        auto it = versionMap.find(ver);
+        assert(it != versionMap.end() && "version not found in graph!");
+        return it->second;
     }
 
-    inline const VDGNodeMapTy& getNodeMap() const
+    inline const VDGNode* getNode(Version ver) const
     {
-        return nodeMap;
+        auto it = versionMap.find(ver);
+        assert(it != versionMap.end() && "version not found in graph!");
+        return it->second;
     }
 
-    // return true if a non-virtual edge is added or an existing virtual edge is updated to non-virtual
-    bool addVDGEdge(VDGNode *src, VDGNode *dst, VDGEdge::VDGEdgeK kind, bool isVirtual)
+    /// Try get node (returns nullptr if not exists)
+    inline VDGNode* tryGetNode(Version ver)
+    {
+        auto it = versionMap.find(ver);
+        return it != versionMap.end() ? it->second : nullptr;
+    }
+
+    inline bool hasVersion(Version ver) const
+    {
+        return versionMap.find(ver) != versionMap.end();
+    }
+
+    inline const VersionToNodeMap& getVersionMap() const
+    {
+        return versionMap;
+    }
+
+    //===--- Rep/Sub Version Management ---===//
+
+    /// Get rep version (returns self if already rep)
+    inline Version getRepVersion(Version v) const
+    {
+        auto it = repMap.find(v);
+        return it != repMap.end() ? it->second : v;
+    }
+
+    /// Check if version is a rep version
+    inline bool isRepVersion(Version v) const
+    {
+        return repMap.find(v) == repMap.end();
+    }
+
+    /// Get all sub versions for a rep (including self)
+    inline const VersionSet& getSubVersions(Version repV) const
+    {
+        auto it = subMap.find(repV);
+        assert(it != subMap.end() && "not a rep version!");
+        return it->second;
+    }
+
+    /// Check if NodeID is a super node (fast O(1) bitset check)
+    inline bool isSuperNode(NodeID id) const
+    {
+        assert(id < superNodes.size() && "NodeID exceeds superNodes size!");
+        return superNodes[id];
+    }
+
+    /// Get number of super nodes
+    size_t getSuperNodeCount() const
+    {
+        size_t count = 0;
+        for (bool b : superNodes) if (b) ++count;
+        return count;
+    }
+
+    //===--- Edge Operations ---===//
+
+    /// Add edge between versions (auto-converts to rep versions via getNode)
+    /// Returns true if a new solid edge is added or virtual edge becomes solid
+    /// This is the only public edge API to ensure rep node semantics
+    inline bool addEdge(Version srcV, Version dstV, VDGEdge::VDGEdgeK kind, bool isVirtual)
+    {
+        VDGNode* src = getNode(srcV);  // getNode returns rep node via versionMap
+        VDGNode* dst = getNode(dstV);
+        if (src == dst) return false;  // No self-loop
+        return addEdgeInternal(src, dst, kind, isVirtual);
+    }
+
+    /// Delete node from graph by NodeID
+    inline void deleteNode(NodeID nodeId)
+    {
+        VDGNode* node = getGNode(nodeId);
+        assert(node && "node not found in VDG!");
+        superNodes[nodeId] = false;
+        removeGNode(node);
+    }
+
+private:
+    void logEdgeChange(const char* tag, const VDGEdge* edge);
+    void logEdgeMembership(const char* tag, const VDGNode* node, const VDGEdge* edge);
+    static bool updateEdgeVirtual(VDGEdge* edge, bool isVirtual);
+    void reTargetDstOfEdge(VDGEdge* edge, VDGNode* newDst);
+    void reTargetSrcOfEdge(VDGEdge* edge, VDGNode* newSrc);
+    void removeVDGEdge(VDGEdge* edge);
+    void removeNode(VDGNode* node);
+    void moveEdgesToRep(VDGNode* node, VDGNode* rep);
+
+    /// Internal edge addition between rep nodes (private to ensure rep node semantics)
+    inline bool addEdgeInternal(VDGNode *src, VDGNode *dst, VDGEdge::VDGEdgeK kind, bool isVirtual)
     {
         assert(src != dst && "VDG edge should not be a self-loop");
         VDGEdge *edge = findEdge(src, dst);
@@ -319,78 +475,6 @@ public:
         return !isVirtual;
     }
 
-    inline NodeID sccRepNode(NodeID id) const
-    {
-        NodeToRepMap::const_iterator it = nodeToRepMap.find(id);
-        return it == nodeToRepMap.end() ? id : it->second;
-    }
-
-    inline NodeBS& sccSubNodes(NodeID id)
-    {
-        nodeToSubsMap[id].set(id);
-        return nodeToSubsMap[id];
-    }
-
-    inline void setRep(NodeID node, NodeID rep)
-    {
-        nodeToRepMap[node] = rep;
-    }
-
-    inline void setSubs(NodeID node, const NodeBS& subs)
-    {
-        nodeToSubsMap[node] |= subs;
-    }
-
-    inline void resetSubs(NodeID node)
-    {
-        nodeToSubsMap.erase(node);
-    }
-
-    // with small side effect
-    inline NodeBS& getSubs(NodeID node)
-    {
-        NodeBS &subs = nodeToSubsMap[node];
-        subs.set(node);
-        return subs;
-    }
-
-    inline NodeID getRep(NodeID node) const
-    {
-        NodeToRepMap::const_iterator it = nodeToRepMap.find(node);
-        return it == nodeToRepMap.end() ? node : it->second;
-    }
-
-    inline bool isSuperNode(NodeID node) const
-    {
-        return getRep(node) == node;
-    }
-
-    inline void resetRep(NodeID node)
-    {
-        nodeToRepMap.erase(node);
-    }
-
-    // remove node excluding its edges
-    inline void deleteNode(NodeID nodeId)
-    {
-        VDGNode* node = getGNode(nodeId);
-        assert(node && "node not found in VDG!");
-        nodeMap.erase(node->getVersionedVar());
-        resetRep(nodeId);
-        resetSubs(nodeId);
-        removeGNode(node);
-    }
-
-private:
-    static void logEdgeChange(const char* tag, const VDGEdge* edge);
-    static void logEdgeMembership(const char* tag, const VDGNode* node, const VDGEdge* edge);
-    static bool updateEdgeVirtual(VDGEdge* edge, bool isVirtual);
-    void reTargetDstOfEdge(VDGEdge* edge, VDGNode* newDst);
-    void reTargetSrcOfEdge(VDGEdge* edge, VDGNode* newSrc);
-    void removeVDGEdge(VDGEdge* edge);
-    void removeNode(VDGNode* node);
-    void moveEdgesToRep(VDGNode* node, VDGNode* rep);
-
     VDGEdge* findEdge(const VDGNode *src, const VDGNode *dst) const
     {
         VDGEdge edge(const_cast<VDGNode*>(src), const_cast<VDGNode*>(dst), VDGEdge::Depend, false);
@@ -399,10 +483,155 @@ private:
         return it == edges.end() ? nullptr : *it;
     }
 
-    VDGNodeMapTy nodeMap;
-    NodeToRepMap nodeToRepMap;
-    NodeToSubsMap nodeToSubsMap;
-    NodeID nextNodeId;
+    NodeID objId;                           ///< Object ID this VDG belongs to
+    VersionToNodeMap versionMap;            ///< version -> rep node (after merge, all point to rep)
+    VersionRepMap repMap;                   ///< sub version -> rep version
+    VersionSubMap subMap;                   ///< rep version -> {all sub versions including self}
+    std::vector<bool> superNodes;           ///< superNodes[nodeId] = true if super node
+    NodeID nextNodeId;                      ///< Next node ID to assign
+    NodeSet updatedNodes;                   ///< Rep node IDs with pending updates
+};
+
+/// VDGManager: Manages multiple VDGs (one per object) with pending update tracking
+class VDGManager
+{
+public:
+    typedef Map<NodeID, std::unique_ptr<VDG>> VDGMapTy;
+
+    VDGManager() = default;
+    ~VDGManager() = default;
+
+    /// Get or create VDG for object
+    inline VDG* getOrCreateVDG(NodeID obj)
+    {
+        auto it = vdgMap.find(obj);
+        if (it != vdgMap.end())
+            return it->second.get();
+        
+        vdgMap[obj] = std::make_unique<VDG>(obj);
+        return vdgMap[obj].get();
+    }
+
+    /// Get VDG for object (assert exists) 
+    inline VDG* getVDG(NodeID obj)
+    {
+        auto it = vdgMap.find(obj);
+        assert(it != vdgMap.end() && "VDG for object not found!");
+        return it->second.get();
+    }
+
+    inline const VDG* getVDG(NodeID obj) const
+    {
+        auto it = vdgMap.find(obj);
+        assert(it != vdgMap.end() && "VDG for object not found!");
+        return it->second.get();
+    }
+
+    /// Try get VDG (returns nullptr if not exists)
+    inline VDG* tryGetVDG(NodeID obj)
+    {
+        auto it = vdgMap.find(obj);
+        return it != vdgMap.end() ? it->second.get() : nullptr;
+    }
+
+    inline const VDG* tryGetVDG(NodeID obj) const
+    {
+        auto it = vdgMap.find(obj);
+        return it != vdgMap.end() ? it->second.get() : nullptr;
+    }
+
+    /// Check if VDG exists for object
+    inline bool hasVDG(NodeID obj) const
+    {
+        return vdgMap.find(obj) != vdgMap.end();
+    }
+
+    /// Mark a version as updated, add obj to pending queue if not already there
+    inline void markVersionUpdated(NodeID obj, Version v)
+    {
+        VDG* graph = getVDG(obj);        
+        graph->markVersionUpdated(v);
+        pendingVDGs.push(obj);
+    }
+
+    /// Mark edge added and source version for propagation
+    /// Note: This is called when a new solid edge is added at runtime (e.g., indirect call)
+    inline void markEdgeAdded(NodeID obj, Version srcV)
+    {
+        VDG* graph = getVDG(obj);
+        graph->markVersionUpdated(srcV);
+    }
+
+    /// Check if there are pending VDGs to process
+    inline bool hasPendingVDGs() const
+    {
+        return !pendingVDGs.empty();
+    }
+
+    /// Pop next pending VDG object ID
+    inline NodeID popPendingVDG()
+    {
+        return pendingVDGs.pop();
+    }
+
+    /// Get all VDGs (for iteration)
+    inline VDGMapTy& getAllVDGs()
+    {
+        return vdgMap;
+    }
+
+    inline const VDGMapTy& getAllVDGs() const
+    {
+        return vdgMap;
+    }
+
+    /// Clear all VDGs
+    inline void clear()
+    {
+        vdgMap.clear();
+        pendingVDGs.clear();
+    }
+
+    //===--- Rep Version Helpers ---===//
+
+    /// Get rep version for (obj, version) pair
+    inline Version getRepVersion(NodeID obj, Version v) const
+    {
+        const VDG* graph = getVDG(obj);
+        return graph->getRepVersion(v);
+    }
+
+    /// Get rep version, returns invalidVersion (0) if not found
+    /// Used for remapping where non-existent versions should be removed
+    inline Version getRepVersionOrInvalid(NodeID obj, Version v) const
+    {
+        const VDG* graph = tryGetVDG(obj);
+        if (!graph || !graph->hasVersion(v)) return 0;  // invalidVersion
+        return graph->getNode(v)->getVersion();
+    }
+
+    /// Create versioned key with rep version lookup
+    inline VersionedVar atRepKey(NodeID obj, Version version) const
+    {
+        assert(version != 0 && "VDGManager::atRepKey: trying to use an invalid version!");
+        Version repV = getRepVersion(obj, version);
+        return std::make_pair(obj, repV);
+    }
+
+    //===--- Statistics & Output ---===//
+    
+    /// Dump detailed VDG statistics (node/edge counts, distributions)
+    void dumpStats() const;
+    
+    /// Write VDG graphs to dot files
+    /// Supports per-object splitting (%o token), min/max node thresholds
+    void writeToFile(const std::string& filename) const;
+
+private:
+    /// Map from object ID to its VDG
+    VDGMapTy vdgMap;
+    /// Queue of object IDs whose VDGs have pending updates
+    FIFOWorkList<NodeID> pendingVDGs;
 };
 
 } // namespace SVF
