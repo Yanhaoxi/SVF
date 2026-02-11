@@ -22,6 +22,15 @@
 #include <thread>
 #include <mutex>
 
+// Uncomment the following line to enable verbose debug logging for VFS solving
+// #define VFS_DEBUG
+
+#ifdef VFS_DEBUG
+#define VFS_DEBUG_LOG(msg) do { SVFUtil::outs() << "[VFS-DBG] " << msg << "\n"; } while(0)
+#else
+#define VFS_DEBUG_LOG(msg) do {} while(0)
+#endif
+
 using namespace SVF;
 
 const Version VersionedFlowSensitive::invalidVersion = 0;
@@ -111,7 +120,9 @@ void VersionedFlowSensitive::initialize()
     }
     if (Options::VDGStat())
         vdgManager.dumpStats();
+
     simplifyVDGGraphs();
+
     if (Options::DumpVDG())
     {
         std::string outName = Options::VDGOutput();
@@ -671,9 +682,18 @@ void VersionedFlowSensitive::solveWorklist()
 {
     // Main solving loop: alternate between stmt worklist and version propagation
     bool changed = true;
+#ifdef VFS_DEBUG
+    unsigned solveIter = 0;
+    unsigned long totalProcessed = 0;
+#endif
     while (changed)
     {
         changed = false;
+#ifdef VFS_DEBUG
+        ++solveIter;
+        unsigned iterProcessed = 0;
+        VFS_DEBUG_LOG("=== solveWorklist iteration " << solveIter << " ===");
+#endif
         
         // Process statement worklist until empty
         while (!isWorklistEmpty())
@@ -681,21 +701,40 @@ void VersionedFlowSensitive::solveWorklist()
             NodeID nodeId = popFromWorklist();
             processNode(nodeId);
             collapseFields();
+#ifdef VFS_DEBUG
+            ++iterProcessed;
+            ++totalProcessed;
+#endif
         }
+
+#ifdef VFS_DEBUG
+        VFS_DEBUG_LOG("  stmt worklist drained: processed " << iterProcessed << " nodes (total so far: " << totalProcessed << ")");
+#endif
         
         // After stmt worklist is empty, do batch version propagation on all updated VDGs
         propagateAllVersions();
         
         // Check if any stmt was added back to worklist during propagation
         if (!isWorklistEmpty())
+        {
             changed = true;
+#ifdef VFS_DEBUG
+            VFS_DEBUG_LOG("  worklist refilled after propagation, continuing...");
+#endif
+        }
     }
+#ifdef VFS_DEBUG
+    VFS_DEBUG_LOG("=== solveWorklist done: " << solveIter << " iterations, " << totalProcessed << " total nodes processed ===");
+#endif
 }
 
 void VersionedFlowSensitive::propagateAllVersions()
 {
     double start = stat->getClk();
     
+#ifdef VFS_DEBUG
+    unsigned vdgCount = 0;
+#endif
     // Only process VDGs that have pending updates
     while (vdgManager.hasPendingVDGs())
     {
@@ -703,13 +742,34 @@ void VersionedFlowSensitive::propagateAllVersions()
         VDG *graph = vdgManager.getVDG(obj);
         
         assert(graph->hasPendingUpdates() && "VFS::propagateAllVersions: pending VDG should have updates!");
+
+#ifdef VFS_DEBUG
+        ++vdgCount;
+        unsigned propEdges = 0;
+        unsigned changedEdges = 0;
+        VFS_DEBUG_LOG("  propagate VDG obj=" << obj
+                      << " nodes=" << graph->getTotalNodeNum()
+                      << " edges=" << graph->getTotalEdgeNum()
+                      << " updated=" << graph->getUpdatedNodes().size());
+#endif
         
         // Define propagation callback: union pts from srcV to dstV
-        auto propagateCallback = [this, obj](Version srcV, Version dstV) -> bool
+        auto propagateCallback = [this, obj
+#ifdef VFS_DEBUG
+            , &propEdges, &changedEdges
+#endif
+        ](Version srcV, Version dstV) -> bool
         {
+#ifdef VFS_DEBUG
+            ++propEdges;
+#endif
             const VersionedVar srcVar = atKey(obj, srcV);
             const VersionedVar dstVar = atKey(obj, dstV);
-            return vPtD->unionPts(dstVar, srcVar);
+            bool changed = vPtD->unionPts(dstVar, srcVar);
+#ifdef VFS_DEBUG
+            if (changed) ++changedEdges;
+#endif
+            return changed;
         };
         
         // Define stmt reliance callback: push related stmts to worklist
@@ -729,8 +789,17 @@ void VersionedFlowSensitive::propagateAllVersions()
         
         // Use VDG's propagation API
         graph->propagateInTopoOrder(propagateCallback, stmtRelianceCallback);
+
+#ifdef VFS_DEBUG
+        VFS_DEBUG_LOG("    propagated " << propEdges << " edges, " << changedEdges << " changed");
+#endif
     }
     
+#ifdef VFS_DEBUG
+    if (vdgCount > 0)
+        VFS_DEBUG_LOG("  propagateAllVersions: processed " << vdgCount << " VDGs");
+#endif
+
     double end = stat->getClk();
     versionPropTime += (end - start) / TIMEINTERVAL;
 }
@@ -738,6 +807,26 @@ void VersionedFlowSensitive::propagateAllVersions()
 void VersionedFlowSensitive::processNode(NodeID n)
 {
     SVFGNode* sn = svfg->getSVFGNode(n);
+#ifdef VFS_DEBUG
+    const char* nodeType = "Unknown";
+    if (SVFUtil::isa<AddrSVFGNode>(sn))         nodeType = "Addr";
+    else if (SVFUtil::isa<CopySVFGNode>(sn))    nodeType = "Copy";
+    else if (SVFUtil::isa<GepSVFGNode>(sn))     nodeType = "Gep";
+    else if (SVFUtil::isa<LoadSVFGNode>(sn))    nodeType = "Load";
+    else if (SVFUtil::isa<StoreSVFGNode>(sn))   nodeType = "Store";
+    else if (SVFUtil::isa<PHISVFGNode>(sn))     nodeType = "Phi";
+    else if (SVFUtil::isa<MSSAPHISVFGNode>(sn)) nodeType = "MSSAPhi";
+    else if (SVFUtil::isa<FormalINSVFGNode>(sn))  nodeType = "FormalIn";
+    else if (SVFUtil::isa<FormalOUTSVFGNode>(sn)) nodeType = "FormalOut";
+    else if (SVFUtil::isa<ActualINSVFGNode>(sn))    nodeType = "ActualIn";
+    else if (SVFUtil::isa<ActualOUTSVFGNode>(sn))  nodeType = "ActualOut";
+    else if (SVFUtil::isa<FormalParmSVFGNode>(sn))  nodeType = "FormalParam";
+    else if (SVFUtil::isa<ActualParmSVFGNode>(sn))  nodeType = "ActualParam";
+    else if (SVFUtil::isa<FormalRetSVFGNode>(sn))   nodeType = "FormalRet";
+    else if (SVFUtil::isa<ActualRetSVFGNode>(sn))   nodeType = "ActualRet";
+    else if (SVFUtil::isa<NullPtrSVFGNode>(sn))     nodeType = "NullPtr";
+    VFS_DEBUG_LOG("    processNode id=" << n << " type=" << nodeType);
+#endif
     if (processSVFGNode(sn))
     {
         propagate(&sn);
@@ -784,6 +873,8 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
                 VDG *graph = vdgManager.getVDG(o);
                 if (graph)
                 {
+                    // Skip if either version was pruned during VDG simplification
+                    if (!graph->hasVersion(srcY) || !graph->hasVersion(dstC)) continue;
                     // Use addEdge with version (auto-converts to rep)
                     if(graph->addEdge(srcY, dstC, VDGEdge::IndCallFlow, false)){
                         // Mark source as updated for batch propagation
@@ -806,7 +897,14 @@ bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
     NodeID p = load->getPAGDstNodeID();
     NodeID q = load->getPAGSrcNodeID();
 
+#ifdef VFS_DEBUG
+    const PointsTo& qptDbg = getPts(q);
+    VFS_DEBUG_LOG("      Load l=" << l << " p=" << p << " q=" << q
+                  << " |pts(q)|=" << qptDbg.count());
+#endif
+
     const PointsTo& qpt = getPts(q);
+
     // p = *q, the type of p must be a pointer
     if (load->getPAGDstNode()->isPointer())
     {
@@ -815,9 +913,12 @@ bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
             if (pag->isConstantObj(o)) continue;
 
             const Version c = getConsume(l, o);
-            if (c != invalidVersion && vPtD->unionPts(p, vdgManager.atRepKey(o, c)))
-            {
-                changed = true;
+            if (c != invalidVersion){
+                VDG* graph = vdgManager.getVDG(o);
+                if (graph->hasVersion(c) && vPtD->unionPts(p, vdgManager.atRepKey(o, c)))
+                {
+                    changed = true;
+                }
             }
 
             if (isFieldInsensitive(o))
@@ -828,7 +929,9 @@ bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
                 for (NodeID of : fields)
                 {
                     const Version c = getConsume(l, of);
-                    if (c != invalidVersion && vPtD->unionPts(p, vdgManager.atRepKey(of, c)))
+                    if (c == invalidVersion) continue;
+                    VDG* graph = vdgManager.getVDG(of);
+                    if (graph->hasVersion(c) && vPtD->unionPts(p, vdgManager.atRepKey(of, c)))
                     {
                         changed = true;
                     }
@@ -838,6 +941,7 @@ bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
     }
     double end = stat->getClk();
     loadTime += (end - start) / TIMEINTERVAL;
+
     return changed;
 }
 
@@ -855,6 +959,12 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
     NodeID l = store->getId();
     // l: *p = q
 
+#ifdef VFS_DEBUG
+    VFS_DEBUG_LOG("      Store l=" << l << " p=" << p << " q=" << q
+                  << " |pts(p)|=" << ppt.count() << " |pts(q)|=" << qpt.count()
+                  << " |consume|=" << consume[l].size());
+#endif
+
     double start = stat->getClk();
 
     if (!qpt.empty())
@@ -867,10 +977,15 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
                 if (pag->isConstantObj(o)) continue;
 
                 const Version y = getYield(l, o);
-                if (y != invalidVersion && vPtD->unionPts(vdgManager.atRepKey(o, y), q))
+                if (y == invalidVersion) continue;
+
+                VDG* graph = vdgManager.getVDG(o);
+                // Skip if version was pruned during VDG simplification
+                if (!graph->hasVersion(y)) continue;
+
+                if (vPtD->unionPts(vdgManager.atRepKey(o, y), q))
                 {
                     // Notify statements that rely on this yield version and all its subs
-                    VDG* graph = vdgManager.getVDG(o);
                     const Version repY = graph->getRepVersion(y);
                     const VersionSet& subs = graph->getSubVersions(repY);
                     for (Version sub : subs)
@@ -912,6 +1027,8 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
         if (y != invalidVersion)
         {
             VDG *graph = vdgManager.getVDG(o);
+            // Skip if either version was pruned during VDG simplification
+            if (!graph->hasVersion(c) || !graph->hasVersion(y)) continue;
             // Use addEdge with version (auto-converts to rep)
             if(graph->addEdge(c, y, VDGEdge::StoreFlow, false)){
                 // Mark source version as updated for batch propagation
@@ -1244,6 +1361,8 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                     continue;
                 }
                 VDG &graph = getGraph(o);
+                graph.getOrAddNode(v, false, false);
+                graph.getOrAddNode(rv, false, false);
                 graph.addEdge(v, rv, VDGEdge::Depend, false);
             }
         }
@@ -1255,6 +1374,7 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
 
 void VersionedFlowSensitive::simplifyVDGGraphs(void)
 {
+    double start = stat->getClk(true);
     std::vector<VDGSimplifyPass> passes;
     registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
     registerVDGSimplifyPass(passes, vdgSimplifyStableReach);
@@ -1269,6 +1389,8 @@ void VersionedFlowSensitive::simplifyVDGGraphs(void)
         for (VDGSimplifyPass pass : passes)
             pass(graph);
     }
+    double end = stat->getClk(true);
+    vdgSimplifyTime = (end - start) / TIMEINTERVAL;
 }
 
 void VersionedFlowSensitive::drawVersionDependencyGraph(const std::string& filename) const
@@ -1282,7 +1404,7 @@ void VersionedFlowSensitive::drawVersionDependencyGraph(const std::string& filen
 void VersionedFlowSensitive::dumpLocVersionMaps(void) const
 {
     SVFUtil::outs() << "# LocVersion Maps\n";
-    auto num = 0;
+    long unsigned int num = 0;
     for (SVFG::iterator it = svfg->begin(); it != svfg->end(); ++it)
     {
         if(num >= consume.size()) {

@@ -560,6 +560,7 @@ public:
     {
         VDG* graph = getVDG(obj);
         graph->markVersionUpdated(srcV);
+        pendingVDGs.push(obj);
     }
 
     /// Check if there are pending VDGs to process

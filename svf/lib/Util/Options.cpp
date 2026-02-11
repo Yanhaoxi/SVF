@@ -222,7 +222,7 @@ const Option<bool> Options::VDGSplitByObject(
 const Option<u32_t> Options::VDGMinNodes(
     "vdg-min-nodes",
     "Minimum node count for emitting a VDG",
-    2
+    1
 );
 
 const Option<u32_t> Options::VDGMaxNodes(

@@ -250,6 +250,7 @@ private:
     double meldLabelingTime; ///< Time to meld label SVFG.
     double versionPropTime;  ///< Time to propagate versions to versions which rely on them.
     double vdgBuildTime;     ///< Time to build VDG after meld labeling.
+    double vdgSimplifyTime;  ///< Time to simplify VDG.
     //@}
 
     static VersionedFlowSensitive *vfspta;

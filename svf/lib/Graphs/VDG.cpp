@@ -34,6 +34,7 @@
 #include "Util/Options.h"
 #include "Util/SVFUtil.h"
 #include <cassert>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <queue>
@@ -208,6 +209,18 @@ void VDG::removeNode(VDGNode* node)
 {
     assert(node && "VDG node to be removed is null!");
     assert(isSuperNode(node->getId()) && "Only rep nodes should be removed via removeNode!");
+    
+    // Clean up versionMap/repMap/subMap for this rep and all its sub versions
+    // to prevent dangling pointers after the node is freed
+    Version repVer = node->getVersion();
+    auto subIt = subMap.find(repVer);
+    assert(subIt != subMap.end() && "rep version should have an entry in subMap!");
+    for (Version sub : subIt->second)
+    {
+        versionMap.erase(sub);
+        repMap.erase(sub);
+    }
+    subMap.erase(subIt);
     
     // Remove all edges
     std::vector<VDGEdge*> edges;
@@ -385,8 +398,29 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
 
     // Compute topological order (also does SCC merge)
     NodeVector topoOrder = sccMergeSolidEdges(getUpdatedNodes());
-    
-    // updatedNodes now serves as the working set (will be extended with transitive successors)
+
+    // After SCC merge, union pts from all sub-versions into their rep version.
+    // This ensures that when versions are merged at runtime (during solving),
+    // the pts data stored under sub-version keys is not lost.
+    // For merges that happened during pre-solving simplification, the sub-versions
+    // have no pts data yet, so unionPts is a no-op.
+    for (NodeID nodeId : topoOrder)
+    {
+        if (!hasGNode(nodeId)) continue;
+        VDGNode* repNode = getGNode(nodeId);
+        const Version repV = repNode->getVersion();
+        const VersionSet& subs = getSubVersions(repV);
+        if (subs.size() <= 1) continue;  // No subs to merge pts from
+        for (Version sub : subs)
+        {
+            if (sub == repV) continue;
+            if (propagate(sub, repV))
+            {
+                // pts changed: mark rep for propagation
+                updatedNodes.insert(nodeId);
+            }
+        }
+    }
 
     // Propagate in topological order
     for (NodeID nodeId : topoOrder)
@@ -400,6 +434,7 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
 
         VDGNode* srcNode = getGNode(nodeId);
         const Version srcV = srcNode->getVersion();
+        onVersionChanged(srcV);
 
         // Propagate to all solid-edge successors
         for (auto it = srcNode->OutEdgeBegin(); it != srcNode->OutEdgeEnd(); ++it)
@@ -416,7 +451,6 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
             {
                 // Points-to changed, mark for further propagation
                 updatedNodes.insert(edge->getDstID());
-                onVersionChanged(dstV);
             }
         }
     }
@@ -1085,37 +1119,11 @@ void VDGManager::writeToFile(const std::string& filename) const
     const size_t minNodesPerGraph = Options::VDGMinNodes();
     const size_t maxNodesPerGraph = Options::VDGMaxNodes();
 
-    auto ensureTemplateHasToken = [&](const std::string &tmpl) -> std::string
-    {
-        if (tmpl.find(perObjectToken) != std::string::npos) return tmpl;
-        if (tmpl.size() >= 4 && tmpl.substr(tmpl.size() - 4) == ".dot")
-            return tmpl.substr(0, tmpl.size() - 4) + "_" + perObjectToken + ".dot";
-        return tmpl + "_" + perObjectToken;
-    };
-
-    auto replaceToken = [&](const std::string &tmpl, const NodeID o) -> std::string
-    {
-        std::string out = tmpl;
-        const std::string obj = std::to_string(o);
-        size_t pos = 0;
-        while ((pos = out.find(perObjectToken, pos)) != std::string::npos)
-        {
-            out.replace(pos, perObjectToken.size(), obj);
-            pos += obj.size();
-        }
-        return out;
-    };
-
     auto withinThreshold = [&](size_t count) -> bool
     {
         if (count < minNodesPerGraph) return false;
         if (maxNodesPerGraph > 0 && count > maxNodesPerGraph) return false;
         return true;
-    };
-
-    auto superNodeCount = [](const VDG &graph) -> size_t
-    {
-        return graph.getSuperNodeCount();
     };
 
     // Collect and sort object IDs for deterministic output
@@ -1125,30 +1133,107 @@ void VDGManager::writeToFile(const std::string& filename) const
         objects.push_back(entry.first);
     std::sort(objects.begin(), objects.end());
 
-    // Generate filename for each object
-    std::string tmpl = filename;
     if (splitByObject)
     {
-        // Ensure template has %o token for per-object filenames
-        tmpl = ensureTemplateHasToken(filename);
+        // Per-object files: use %o token in filename template
+        auto ensureTemplateHasToken = [&](const std::string &tmpl) -> std::string
+        {
+            if (tmpl.find(perObjectToken) != std::string::npos) return tmpl;
+            if (tmpl.size() >= 4 && tmpl.substr(tmpl.size() - 4) == ".dot")
+                return tmpl.substr(0, tmpl.size() - 4) + "_" + perObjectToken + ".dot";
+            return tmpl + "_" + perObjectToken;
+        };
+
+        auto replaceToken = [&](const std::string &tmpl, const NodeID o) -> std::string
+        {
+            std::string out = tmpl;
+            const std::string obj = std::to_string(o);
+            size_t pos = 0;
+            while ((pos = out.find(perObjectToken, pos)) != std::string::npos)
+            {
+                out.replace(pos, perObjectToken.size(), obj);
+                pos += obj.size();
+            }
+            return out;
+        };
+
+        const std::string tmpl = ensureTemplateHasToken(filename);
+        for (const NodeID o : objects)
+        {
+            const auto& graphPtr = vdgMap.at(o);
+            if (!graphPtr) continue;
+            if (!withinThreshold(graphPtr->getSuperNodeCount())) continue;
+            graphPtr->dump(replaceToken(tmpl, o));
+        }
     }
     else
     {
-        // When not explicitly split by object, still generate per-object files with _obj suffix
-        if (tmpl.size() >= 4 && tmpl.substr(tmpl.size() - 4) == ".dot")
-            tmpl = tmpl.substr(0, tmpl.size() - 4) + "_obj" + perObjectToken + ".dot";
-        else
-            tmpl = tmpl + "_obj" + perObjectToken + ".dot";
-    }
+        // Single merged DOT file: all VDGs as subgraph clusters
+        // Node names use "o{obj}v{ver}" to avoid collisions across objects
+        std::string dotPath = filename;
+        if (dotPath.size() < 4 || dotPath.substr(dotPath.size() - 4) != ".dot")
+            dotPath += ".dot";
 
-    // Write each VDG to its own file (avoids node ID conflicts)
-    for (const NodeID o : objects)
-    {
-        const auto& graphPtr = vdgMap.at(o);
-        if (!graphPtr)
-            continue;
-        if (!withinThreshold(superNodeCount(*graphPtr)))
-            continue;
-        graphPtr->dump(replaceToken(tmpl, o));
+        std::ofstream out(dotPath);
+        if (!out.is_open())
+        {
+            SVFUtil::errs() << "VDGManager::writeToFile: cannot open " << dotPath << "\n";
+            return;
+        }
+
+        out << "digraph VDG {\n";
+
+        for (const NodeID o : objects)
+        {
+            const auto& graphPtr = vdgMap.at(o);
+            if (!graphPtr) continue;
+            if (!withinThreshold(graphPtr->getSuperNodeCount())) continue;
+            const VDG &graph = *graphPtr;
+
+            out << "  subgraph cluster_obj" << o << " {\n";
+            out << "    label=\"obj=" << o << "\";\n";
+            out << "    style=dashed;\n";
+
+            // Nodes
+            for (auto it = graph.begin(); it != graph.end(); ++it)
+            {
+                const VDGNode *node = it->second;
+                if (!graph.isSuperNode(node->getId())) continue;
+
+                out << "    o" << o << "v" << node->getVersion()
+                    << " [label=\"o=" << o << "\\nv=" << node->getVersion() << "\""
+                    << ", shape=" << (node->isLoadConsume() ? "box" : "ellipse")
+                    << ", style=filled"
+                    << ", fillcolor=" << (node->isStoreYield() ? "mistyrose" : "white")
+                    << "];\n";
+            }
+
+            // Edges
+            for (auto it = graph.begin(); it != graph.end(); ++it)
+            {
+                const VDGNode *node = it->second;
+                if (!graph.isSuperNode(node->getId())) continue;
+
+                for (auto eit = node->OutEdgeBegin(); eit != node->OutEdgeEnd(); ++eit)
+                {
+                    const VDGEdge *edge = *eit;
+                    if (!graph.isSuperNode(edge->getDstID())) continue;
+                    const VDGNode *dst = edge->getDstNode();
+
+                    out << "    o" << o << "v" << node->getVersion()
+                        << " -> o" << o << "v" << dst->getVersion();
+                    if (edge->isVirtualEdge())
+                        out << " [style=dashed]";
+                    out << ";\n";
+                }
+            }
+
+            out << "  }\n";
+        }
+
+        out << "}\n";
+        out.close();
+
+        SVFUtil::outs() << "VDG merged graph written to " << dotPath << "\n";
     }
 }
