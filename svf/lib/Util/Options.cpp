@@ -237,13 +237,6 @@ const Option<std::string> Options::VDGOutput(
     "vdg"
 );
 
-Option<bool> Options::DetectVE(
-    "detect-ve",
-    "Include virtual (dashed) edges when computing SCC on VDG",
-    true
-);
-
-
 // Base class of pointer analyses (PointerAnalysis.cpp)
 const Option<bool> Options::TypePrint(
     "print-type",

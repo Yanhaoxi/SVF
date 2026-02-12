@@ -90,16 +90,6 @@ VDGNode::const_iterator VDGNode::directInEdgeEnd() const
     return GenericVDGNodeTy::InEdgeEnd();
 }
 
-void VDG::setDetectVE(bool flag)
-{
-    Options::DetectVE.setValue(flag);
-}
-
-bool VDG::detectVE()
-{
-    return Options::DetectVE();
-}
-
 void VDG::dump(const std::string& filename)
 {
     std::string name = filename;
@@ -345,9 +335,6 @@ void VDG::mergeVersionsIntoRep(const VersionSet& versions, Version repVer)
 // @param candidates: if non-empty, only traverse from these node IDs; otherwise traverse all
 NodeVector VDG::sccMergeSolidEdges(NodeSet candidates)
 {
-    const bool oldDetect = detectVE();
-    setDetectVE(false);  // Only consider solid edges
-
     SCCDetection<VDG*> scc(this);
     if (candidates.empty())
     {
@@ -357,8 +344,6 @@ NodeVector VDG::sccMergeSolidEdges(NodeSet candidates)
     {
         scc.find(candidates);  // Only from candidate nodes
     }
-
-    setDetectVE(oldDetect);
 
     // Get topological order from SCC detection
     SCCDetection<VDG*>::GNodeStack topoStack = scc.topoNodeStack();

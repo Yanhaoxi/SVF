@@ -43,6 +43,8 @@ public:
     typedef std::vector<ObjToVersionMap> LocVersionMap;
     /// (o -> (v -> versions with rely on o:v).
     typedef Map<NodeID, Map<Version, std::vector<Version>>> VersionRelianceMap;
+    typedef Map<NodeID, const Map<Version, std::vector<Version>> *> VersionRelianceRefMap;
+    typedef Map<NodeID, Map<Version, NodeBS> *> StmtRelianceRefMap;
 
     /// If this version appears, there has been an error.
     static const Version invalidVersion;
@@ -99,6 +101,7 @@ public:
 protected:
     virtual bool processLoad(const LoadSVFGNode* load) override;
     virtual bool processStore(const StoreSVFGNode* store) override;
+    virtual bool processGep(const GepSVFGNode* edge) override;
     virtual void processNode(NodeID n) override;
     virtual void updateConnectedNodes(const SVFGEdgeSetTy& newEdges) override;
 
@@ -106,6 +109,34 @@ protected:
     virtual bool propAlongIndirectEdge(const IndirectSVFGEdge*) override
     {
         return false;
+    }
+
+    /// Override pushIntoWorklist to route nodes to priority worklists
+    virtual inline void pushIntoWorklist(NodeID id) override
+    {
+        NodeID repId = sccRepNode(id);
+        int prio = isStore(repId) ? 2 : (isLoad(repId) ? 0 : 1);
+        priorityWorklist[prio].push(repId);
+    }
+
+    /// Override isWorklistEmpty to check priority worklists
+    inline bool isWorklistEmpty()
+    {
+        return priorityWorklist[0].empty()
+            && priorityWorklist[1].empty()
+            && priorityWorklist[2].empty();
+    }
+
+    /// Override popFromWorklist to pop from priority worklists  
+    inline NodeID popFromWorklist()
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            if (!priorityWorklist[i].empty())
+                return sccRepNode(priorityWorklist[i].pop());
+        }
+        assert(false && "popFromWorklist called on empty worklists");
+        return 0;
     }
 
     /// Override since we want to assign different weights based on versioning.
@@ -209,8 +240,12 @@ private:
 
     /// o -> (version -> versions which rely on it).
     VersionRelianceMap versionReliance;
+    /// Object -> reference to canonical version reliance map.
+    VersionRelianceRefMap versionRelianceRef;
     /// o x version -> statement nodes which rely on that o/version.
     Map<NodeID, Map<Version, NodeBS>> stmtReliance;
+    /// Object -> reference to canonical statement reliance map.
+    StmtRelianceRefMap stmtRelianceRef;
 
     // Maps an object o to o' if o is equivalent to o' with respect to
     // versioning. Thus, we don't need to store the versions of o and look
@@ -220,6 +255,28 @@ private:
     /// Worklist for performing meld labeling, takes SVFG node l.
     /// Nodes are added when the version they yield is changed.
     FIFOWorkList<NodeID> vWorklist;
+
+    /// Priority worklists for staged processing
+    /// Priority 0: Load nodes (processed first — produces data for other stmts)
+    /// Priority 1: Other nodes (addr/copy/phi/gep — processed second)
+    /// Priority 2: Store nodes (processed last — consumes data)
+    FIFOWorkList<NodeID> priorityWorklist[3];
+
+    //===--- Caching ---===//
+
+    /// Load cache: SVFG load location -> cached qpt (points-to of q at this load site).
+    /// Single-level map keyed by loc. Invalidated by erasing key when load is
+    /// re-queued via stmtRelianceCallback.
+    Map<NodeID, PointsTo> loadPtsCache;
+
+    /// Store SU cache: SVFG store location -> cache level.
+    /// Monotonically increasing: 0=unvisited, 1=singleton_SU, 2=non-SU (stable).
+    /// Never invalidated — levels only go up.
+    Map<NodeID, u8_t> storeSUCache;
+
+    /// GEP cache: GEP SVFG node ID -> last seen srcPts.
+    /// Compared before use; if srcPts unchanged, skip recomputation.
+    Map<NodeID, PointsTo> gepPtsCache;
 
     Set<NodeID> prelabeledObjects;
 

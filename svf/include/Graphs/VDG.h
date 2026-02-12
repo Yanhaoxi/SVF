@@ -272,9 +272,6 @@ public:
 
     ~VDG() override = default;
 
-    static void setDetectVE(bool flag);
-    static bool detectVE();
-
     /// Get the object ID this VDG belongs to
     inline NodeID getObjId() const { return objId; }
 
@@ -424,6 +421,57 @@ public:
 
     //===--- Edge Operations ---===//
 
+    /// Deep-copy this VDG for a different object ID.
+    /// Creates an independent copy with identical structure (nodes, edges, rep/sub maps).
+    inline std::unique_ptr<VDG> clone(NodeID newObjId) const
+    {
+        auto copy = std::make_unique<VDG>(newObjId);
+        copy->nextNodeId = nextNodeId;
+        copy->superNodes = superNodes;
+        copy->repMap = repMap;
+        copy->subMap = subMap;
+
+        // Copy nodes
+        for (auto it = begin(), eit = end(); it != eit; ++it)
+        {
+            const VDGNode* origNode = it->second;
+            VDGNode* newNode = new VDGNode(origNode->getId(), origNode->getVersion(),
+                                           origNode->isLoadConsume(), origNode->isStoreYield());
+            newNode->incrementMergedCount(origNode->getMergedCount() - 1);
+            copy->addGNode(newNode->getId(), newNode);
+            copy->versionMap[origNode->getVersion()] = newNode;
+        }
+
+        // Rebuild versionMap for sub versions pointing to rep nodes
+        for (const auto& kv : repMap)
+        {
+            Version subV = kv.first;
+            Version repV = kv.second;
+            auto repIt = copy->versionMap.find(repV);
+            if (repIt != copy->versionMap.end())
+                copy->versionMap[subV] = repIt->second;
+        }
+
+        // Copy edges
+        for (auto it = begin(), eit = end(); it != eit; ++it)
+        {
+            const VDGNode* origSrc = it->second;
+            for (auto ei = origSrc->OutEdgeBegin(), eei = origSrc->OutEdgeEnd(); ei != eei; ++ei)
+            {
+                const VDGEdge* origEdge = *ei;
+                VDGNode* newSrc = copy->getGNode(origEdge->getSrcID());
+                VDGNode* newDst = copy->getGNode(origEdge->getDstID());
+                VDGEdge* newEdge = new VDGEdge(newSrc, newDst,
+                                               origEdge->getVDGEdgeKind(),
+                                               origEdge->isVirtualEdge());
+                newSrc->addOutgoingEdgeWithKind(newEdge);
+                newDst->addIncomingEdgeWithKind(newEdge);
+            }
+        }
+
+        return copy;
+    }
+
     /// Add edge between versions (auto-converts to rep versions via getNode)
     /// Returns true if a new solid edge is added or virtual edge becomes solid
     /// This is the only public edge API to ensure rep node semantics
@@ -507,12 +555,11 @@ public:
         auto it = vdgMap.find(obj);
         if (it != vdgMap.end())
             return it->second.get();
-        
         vdgMap[obj] = std::make_unique<VDG>(obj);
         return vdgMap[obj].get();
     }
 
-    /// Get VDG for object (assert exists) 
+    /// Get VDG for object (assert exists)
     inline VDG* getVDG(NodeID obj)
     {
         auto it = vdgMap.find(obj);
@@ -546,16 +593,25 @@ public:
         return vdgMap.find(obj) != vdgMap.end();
     }
 
-    /// Mark a version as updated, add obj to pending queue if not already there
+    /// Deep-copy a canonical object's VDG to a new object ID.
+    /// Each object gets its own independent VDG that can evolve separately during solving.
+    inline void copyVDGForObj(NodeID srcObj, NodeID dstObj)
+    {
+        assert(srcObj != dstObj && "VDGManager: cannot copy VDG to same object!");
+        auto it = vdgMap.find(srcObj);
+        assert(it != vdgMap.end() && "VDGManager: source VDG not found!");
+        vdgMap[dstObj] = it->second->clone(dstObj);
+    }
+
+    /// Mark a version as updated, add obj to pending queue
     inline void markVersionUpdated(NodeID obj, Version v)
     {
-        VDG* graph = getVDG(obj);        
+        VDG* graph = getVDG(obj);
         graph->markVersionUpdated(v);
         pendingVDGs.push(obj);
     }
 
     /// Mark edge added and source version for propagation
-    /// Note: This is called when a new solid edge is added at runtime (e.g., indirect call)
     inline void markEdgeAdded(NodeID obj, Version srcV)
     {
         VDG* graph = getVDG(obj);
@@ -725,11 +781,11 @@ template<> struct GenericGraphTraits<SVF::VDG*> : public GenericGraphTraits<SVF:
     }
     static inline ChildIteratorType direct_child_begin(const VDGNode* N)
     {
-        return ChildIteratorType(N->OutEdgeBegin(), N->OutEdgeEnd(), !SVF::VDG::detectVE());
+        return ChildIteratorType(N->OutEdgeBegin(), N->OutEdgeEnd(), true);
     }
     static inline ChildIteratorType direct_child_end(const VDGNode* N)
     {
-        return ChildIteratorType(N->OutEdgeEnd(), N->OutEdgeEnd(), !SVF::VDG::detectVE());
+        return ChildIteratorType(N->OutEdgeEnd(), N->OutEdgeEnd(), true);
     }
 };
 } // namespace SVF

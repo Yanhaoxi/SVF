@@ -308,11 +308,8 @@ void VersionedFlowSensitive::meldLabel(void)
                 else
                 {
                     this->equivalentObject[o] = canonOwner->second;
-                    // Same version and stmt reliance as the canonical. During solving we cannot just reuse
-                    // the canonical object's reliance because it may change due to on-the-fly call graph
-                    // construction. Something like copy-on-write could be good... probably negligible.
-                    this->versionReliance.at(o) = this->versionReliance.at(canonOwner->second);
-                    this->stmtReliance.at(o) = this->stmtReliance.at(canonOwner->second);
+                    // Reliance maps are kept on canonical objects only and queried through
+                    // equivalentObject mapping at use sites.
                     continue;
                 }
             }
@@ -498,6 +495,17 @@ void VersionedFlowSensitive::meldLabel(void)
     for (unsigned i = 0; i < Options::VersioningThreads(); ++i) workers.push_back(std::thread(meldVersionWorker, i));
     for (std::thread &worker : workers) worker.join();
 
+    // Fill equivalent objects with references to canonical reliance maps.
+    versionRelianceRef.clear();
+    stmtRelianceRef.clear();
+    for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
+    {
+        const NodeID o = kv.first;
+        const NodeID canon = kv.second;
+        versionRelianceRef[o] = &versionReliance[canon];
+        stmtRelianceRef[o] = &stmtReliance[canon];
+    }
+
     delete[] versionMutexes;
 
     double end = stat->getClk(true);
@@ -681,6 +689,7 @@ void VersionedFlowSensitive::removeAllIndirectSVFGEdges(void)
 void VersionedFlowSensitive::solveWorklist()
 {
     // Main solving loop: alternate between stmt worklist and version propagation
+    // Uses priority-based processing: addr/load nodes first, then others, then stores last
     bool changed = true;
 #ifdef VFS_DEBUG
     unsigned solveIter = 0;
@@ -695,7 +704,7 @@ void VersionedFlowSensitive::solveWorklist()
         VFS_DEBUG_LOG("=== solveWorklist iteration " << solveIter << " ===");
 #endif
         
-        // Process statement worklist until empty
+        // Process priority worklist in order: addr/load (0) -> other (1) -> store (2)
         while (!isWorklistEmpty())
         {
             NodeID nodeId = popFromWorklist();
@@ -727,6 +736,7 @@ void VersionedFlowSensitive::solveWorklist()
     VFS_DEBUG_LOG("=== solveWorklist done: " << solveIter << " iterations, " << totalProcessed << " total nodes processed ===");
 #endif
 }
+
 
 void VersionedFlowSensitive::propagateAllVersions()
 {
@@ -772,7 +782,7 @@ void VersionedFlowSensitive::propagateAllVersions()
             return changed;
         };
         
-        // Define stmt reliance callback: push related stmts to worklist
+        // Define stmt reliance callback: push related stmts to worklist and clear load cache
         // Must handle all sub versions since dynamic merging may occur
         auto stmtRelianceCallback = [this, obj, graph](Version v)
         {
@@ -782,6 +792,15 @@ void VersionedFlowSensitive::propagateAllVersions()
             {
                 for (NodeID s : getStmtReliance(obj, sub))
                 {
+                    // stmtReliance contains both loads and stores (set in meldLabel).
+                    // For loads: clear the specific object bit so processLoad's delta includes it.
+                    // For stores: just re-enqueue (store cache handles its own monotonic logic).
+                    if (isLoad(s))
+                    {
+                        auto cacheIt = loadPtsCache.find(s);
+                        if (cacheIt != loadPtsCache.end())
+                            cacheIt->second.reset(obj);
+                    }
                     pushIntoWorklist(s);
                 }
             }
@@ -903,12 +922,25 @@ bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
                   << " |pts(q)|=" << qptDbg.count());
 #endif
 
+    // Load cache: loadPtsCache[l] tracks which objects have been processed.
+    // stmtRelianceCallback clears specific obj bits when versioned pts change.
+    // Delta = qpt - cached: objects newly in qpt or whose bits were cleared.
     const PointsTo& qpt = getPts(q);
+    auto cacheIt = loadPtsCache.find(l);
+    const bool hasCachedPts = (cacheIt != loadPtsCache.end());
+    PointsTo deltaQpt = hasCachedPts ? (qpt - cacheIt->second) : qpt;
+    if (deltaQpt.empty())
+    {
+        double end = stat->getClk();
+        loadTime += (end - start) / TIMEINTERVAL;
+        return false;
+    }
+    loadPtsCache[l] |= deltaQpt;
 
     // p = *q, the type of p must be a pointer
     if (load->getPAGDstNode()->isPointer())
     {
-        for (NodeID o : qpt)
+        for (NodeID o : deltaQpt)
         {
             if (pag->isConstantObj(o)) continue;
 
@@ -985,17 +1017,6 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
 
                 if (vPtD->unionPts(vdgManager.atRepKey(o, y), q))
                 {
-                    // Notify statements that rely on this yield version and all its subs
-                    const Version repY = graph->getRepVersion(y);
-                    const VersionSet& subs = graph->getSubVersions(repY);
-                    for (Version sub : subs)
-                    {
-                        for (NodeID s : getStmtReliance(o, sub))
-                        {
-                            pushIntoWorklist(s);
-                        }
-                    }
-
                     // Mark version as updated for batch propagation through VDG edges
                     vdgManager.markVersionUpdated(o, y);
                 }
@@ -1008,31 +1029,62 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
 
     double updateStart = stat->getClk();
 
-    NodeID singleton = 0;
-    bool isSU = isStrongUpdate(store, singleton);
-    if (isSU) svfgHasSU.set(l);
-    else svfgHasSU.reset(l);
+    // Store SU cache: monotonically increasing, 0=unvisited, 1=singleton SU, 2=non-SU (stable).
+    // Once cache reaches 2, the SU decision is final (no SU), so VDG edges are already in place.
+    // Once cache reaches 1, we skip if pts(p) is still singleton (SU skips the unique target).
+    auto cacheIt = storeSUCache.find(l);
+    u8_t cache = (cacheIt != storeSUCache.end()) ? cacheIt->second : 0;
 
-    // For all objects, perform pts(o:y) = pts(o:y) U pts(o:c) at loc,
-    // except when a strong update is taking place.
-    for (const ObjToVersionMap::value_type &oc : consume[l])
+    // cache==2: non-SU, all VDG consume->yield edges already added. Skip.
+    // cache==1 + singleton: SU already handled, skip.
+    if (cache < 2)
     {
-        const NodeID o = oc.first;
-        const Version c = oc.second;
+        const PointsTo& dstCPSet = getPts(store->getPAGDstNodeID());
 
-        // Strong-updated; don't propagate.
-        if (isSU && o == singleton) continue;
-
-        const Version y = getYield(l, o);
-        if (y != invalidVersion)
+        // cache==1 means we previously determined SU singleton. If still singleton, skip.
+        if (cache == 1 && dstCPSet.count() == 1)
         {
-            VDG *graph = vdgManager.getVDG(o);
-            // Skip if either version was pruned during VDG simplification
-            if (!graph->hasVersion(c) || !graph->hasVersion(y)) continue;
-            // Use addEdge with version (auto-converts to rep)
-            if(graph->addEdge(c, y, VDGEdge::StoreFlow, false)){
-                // Mark source version as updated for batch propagation
-                vdgManager.markEdgeAdded(o, c);
+            // Already handled as SU singleton; VDG edges are stable.
+        }
+        else
+        {
+            NodeID singleton = 0;
+            bool isSU = false;
+
+            if (dstCPSet.count() == 1)
+            {
+                singleton = *dstCPSet.begin();
+                if (!isHeapMemObj(singleton) && !isArrayMemObj(singleton)
+                    && !pag->getBaseObject(singleton)->isFieldInsensitive()
+                    && !isLocalVarInRecursiveFun(singleton))
+                {
+                    isSU = true;
+                }
+            }
+            // else: dstCPSet empty or count>1 → no SU possible
+
+            // Set cache level: 1 if SU singleton, 2 otherwise (non-SU or multi-target)
+            storeSUCache[l] = isSU ? 1 : 2;
+
+            // Add VDG consume->yield edges for all objects at this store,
+            // except the singleton target when SU is applicable.
+            for (const ObjToVersionMap::value_type &oc : consume[l])
+            {
+                const NodeID o = oc.first;
+                const Version c = oc.second;
+
+                // Strong-updated object; don't add consume→yield edge.
+                if (isSU && o == singleton) continue;
+
+                const Version y = getYield(l, o);
+                if (y == invalidVersion) continue;
+
+                VDG *graph = vdgManager.getVDG(o);
+                if (!graph->hasVersion(c) || !graph->hasVersion(y)) continue;
+                if (graph->addEdge(c, y, VDGEdge::StoreFlow, false))
+                {
+                    vdgManager.markEdgeAdded(o, c);
+                }
             }
         }
     }
@@ -1043,6 +1095,64 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
     return false;
 }
 
+bool VersionedFlowSensitive::processGep(const GepSVFGNode* edge)
+{
+    double start = stat->getClk();
+    bool changed = false;
+
+    NodeID gepId = edge->getId();
+    const PointsTo& srcPts = getPts(edge->getPAGSrcNodeID());
+
+    // Delta cache: gepPtsCache[gepId] tracks which src objects have been processed.
+    // Only iterate newly added objects (delta = srcPts - cached).
+    auto cacheIt = gepPtsCache.find(gepId);
+    const bool hasCached = (cacheIt != gepPtsCache.end());
+    PointsTo deltaSrcPts = hasCached ? (srcPts - cacheIt->second) : srcPts;
+    if (deltaSrcPts.empty())
+    {
+        double end = stat->getClk();
+        gepTime += (end - start) / TIMEINTERVAL;
+        return false;
+    }
+    gepPtsCache[gepId] |= deltaSrcPts;
+
+    PointsTo tmpDstPts;
+    const GepStmt* gepStmt = SVFUtil::cast<GepStmt>(edge->getPAGEdge());
+    if (gepStmt->isVariantFieldGep())
+    {
+        for (NodeID o : deltaSrcPts)
+        {
+            if (isBlkObjOrConstantObj(o))
+            {
+                tmpDstPts.set(o);
+                continue;
+            }
+            setObjFieldInsensitive(o);
+            tmpDstPts.set(getFIObjVar(o));
+        }
+    }
+    else
+    {
+        for (NodeID o : deltaSrcPts)
+        {
+            if (isBlkObjOrConstantObj(o) || isFieldInsensitive(o))
+            {
+                tmpDstPts.set(o);
+                continue;
+            }
+            NodeID fieldSrcPtdNode = getGepObjVar(o, gepStmt->getAccessPath().getConstantStructFldIdx());
+            tmpDstPts.set(fieldSrcPtdNode);
+        }
+    }
+
+    if (unionPts(edge->getPAGDstNodeID(), tmpDstPts))
+        changed = true;
+
+    double end = stat->getClk();
+    gepTime += (end - start) / TIMEINTERVAL;
+    return changed;
+}
+
 void VersionedFlowSensitive::cluster(void)
 {
     std::vector<std::pair<unsigned, unsigned>> keys;
@@ -1051,7 +1161,11 @@ void VersionedFlowSensitive::cluster(void)
         unsigned occ = 1;
         //ABTest
         unsigned v = pit->first;
-        if (Options::PredictPtOcc() && pag->getBaseObject(v) != nullptr) occ = stmtReliance[v].size() + 1;
+        if (Options::PredictPtOcc() && pag->getBaseObject(v) != nullptr)
+        {
+            const StmtRelianceRefMap::const_iterator relIt = stmtRelianceRef.find(v);
+            occ = (relIt == stmtRelianceRef.end() ? stmtReliance[v].size() : relIt->second->size()) + 1;
+        }
         assert(occ != 0);
         keys.push_back(std::make_pair(v, occ));
     }
@@ -1066,11 +1180,7 @@ void VersionedFlowSensitive::cluster(void)
 
 Version VersionedFlowSensitive::getVersion(const NodeID l, const NodeID o, const LocVersionMap &lvm) const
 {
-    // const Map<NodeID, NodeID>::const_iterator canonObjectIt = equivalentObject.find(o);
-    // const NodeID op = canonObjectIt == equivalentObject.end() ? o : canonObjectIt->second;
-    // 经过 expandEquivalentObjectVersions() 扩展后，所有对象都有自己的版本条目无需再通过 equivalentObject 查找规范对象
     const ObjToVersionMap &ovm = lvm[l];
-    // const ObjToVersionMap::const_iterator foundVersion = ovm.find(op);
     const ObjToVersionMap::const_iterator foundVersion = ovm.find(o);
     return foundVersion == ovm.end() ? invalidVersion : foundVersion->second;
 }
@@ -1107,7 +1217,9 @@ void VersionedFlowSensitive::setYield(const NodeID l, const NodeID o, const Vers
 
 NodeBS &VersionedFlowSensitive::getStmtReliance(const NodeID o, const Version v)
 {
-    return stmtReliance[o][v];
+    const StmtRelianceRefMap::const_iterator relIt = stmtRelianceRef.find(o);
+    Map<Version, NodeBS> *relMap = relIt == stmtRelianceRef.end() ? &stmtReliance[o] : relIt->second;
+    return (*relMap)[v];
 }
 
 void VersionedFlowSensitive::dumpReliances(void) const
@@ -1344,12 +1456,14 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
         }
 
     }
-    // dumpReliances();
 
-    for (const VersionRelianceMap::value_type &ovrv : versionReliance)
+    for (const VersionRelianceRefMap::value_type &ovrvRef : versionRelianceRef)
     {
-        const NodeID o = ovrv.first;
-        for (const Map<Version, std::vector<Version>>::value_type &vrv : ovrv.second)
+        const NodeID o = ovrvRef.first;
+        const Map<Version, std::vector<Version>> *osVersionReliance = ovrvRef.second;
+        if (osVersionReliance == nullptr) continue;
+
+        for (const Map<Version, std::vector<Version>>::value_type &vrv : *osVersionReliance)
         {
             const Version v = vrv.first;
             if (v == invalidVersion) continue;
@@ -1368,6 +1482,9 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
         }
     }
 
+    versionRelianceRef.clear();
+    VersionRelianceMap().swap(versionReliance);
+
     double end = stat->getClk(true);
     vdgBuildTime = (end - start) / TIMEINTERVAL;
 }
@@ -1375,20 +1492,64 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
 void VersionedFlowSensitive::simplifyVDGGraphs(void)
 {
     double start = stat->getClk(true);
+
     std::vector<VDGSimplifyPass> passes;
     registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
+    registerVDGSimplifyPass(passes, vdgSimplifyChainContraction);
     registerVDGSimplifyPass(passes, vdgSimplifyStableReach);
     registerVDGSimplifyPass(passes, vdgSimplifyTransRedundancy);
     registerVDGSimplifyPass(passes, vdgSimplifyChainContraction);
 
-    for (VDGManager::VDGMapTy::value_type &entry : vdgManager.getAllVDGs())
+    // Collect all VDGs that need simplification (canonical objects only)
+    std::queue<NodeID> vdgQueue;
+    for (auto& entry : vdgManager.getAllVDGs())
     {
-        if (!entry.second)
-            continue;
-        VDG &graph = *entry.second;
-        for (VDGSimplifyPass pass : passes)
-            pass(graph);
+        if (entry.second)
+            vdgQueue.push(entry.first);
     }
+
+    unsigned numThreads = Options::VersioningThreads();
+    if (numThreads <= 1)
+    {
+        // Sequential
+        while (!vdgQueue.empty())
+        {
+            NodeID obj = vdgQueue.front();
+            vdgQueue.pop();
+            VDG& graph = *vdgManager.getVDG(obj);
+            for (VDGSimplifyPass pass : passes)
+                pass(graph);
+        }
+    }
+    else
+    {
+        // Parallel: match meldLabel thread pool style
+        std::mutex queueMutex;
+
+        auto simplifyWorker = [&](const unsigned thread)
+        {
+            (void)thread;
+            while (true)
+            {
+                NodeID obj;
+                {
+                    std::lock_guard<std::mutex> guard(queueMutex);
+                    if (vdgQueue.empty()) return;
+                    obj = vdgQueue.front();
+                    vdgQueue.pop();
+                }
+
+                VDG& graph = *vdgManager.getVDG(obj);
+                for (VDGSimplifyPass pass : passes)
+                    pass(graph);
+            }
+        };
+
+        std::vector<std::thread> workers;
+        for (unsigned i = 0; i < numThreads; ++i) workers.push_back(std::thread(simplifyWorker, i));
+        for (std::thread &worker : workers) worker.join();
+    }
+
     double end = stat->getClk(true);
     vdgSimplifyTime = (end - start) / TIMEINTERVAL;
 }
