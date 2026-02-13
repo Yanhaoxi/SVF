@@ -30,16 +30,13 @@
 #include "Graphs/GraphPrinter.h"
 #include "Util/GeneralType.h"
 #include "Util/WorkList.h"
-#include "Graphs/SCC.h"
 #include "Util/Options.h"
 #include "Util/SVFUtil.h"
 #include <cassert>
 #include <fstream>
 #include <functional>
 #include <limits>
-#include <queue>
 #include <unordered_map>
-#include <unordered_set>
 #include <sstream>
 #include <vector>
 
@@ -49,46 +46,6 @@ using namespace SVF;
 #ifndef VDG_EDGE_DEBUG
 #define VDG_EDGE_DEBUG 0
 #endif
-
-VDGNode::iterator VDGNode::directOutEdgeBegin()
-{
-    return GenericVDGNodeTy::OutEdgeBegin();
-}
-
-VDGNode::iterator VDGNode::directOutEdgeEnd()
-{
-    return GenericVDGNodeTy::OutEdgeEnd();
-}
-
-VDGNode::iterator VDGNode::directInEdgeBegin()
-{
-    return GenericVDGNodeTy::InEdgeBegin();
-}
-
-VDGNode::iterator VDGNode::directInEdgeEnd()
-{
-    return GenericVDGNodeTy::InEdgeEnd();
-}
-
-VDGNode::const_iterator VDGNode::directOutEdgeBegin() const
-{
-    return GenericVDGNodeTy::OutEdgeBegin();
-}
-
-VDGNode::const_iterator VDGNode::directOutEdgeEnd() const
-{
-    return GenericVDGNodeTy::OutEdgeEnd();
-}
-
-VDGNode::const_iterator VDGNode::directInEdgeBegin() const
-{
-    return GenericVDGNodeTy::InEdgeBegin();
-}
-
-VDGNode::const_iterator VDGNode::directInEdgeEnd() const
-{
-    return GenericVDGNodeTy::InEdgeEnd();
-}
 
 void VDG::dump(const std::string& filename)
 {
@@ -200,17 +157,16 @@ void VDG::removeNode(VDGNode* node)
     assert(node && "VDG node to be removed is null!");
     assert(isSuperNode(node->getId()) && "Only rep nodes should be removed via removeNode!");
     
-    // Clean up versionMap/repMap/subMap for this rep and all its sub versions
+    // Clean up verVec_/repVec_/subVec_ for this rep and all its sub versions
     // to prevent dangling pointers after the node is freed
     Version repVer = node->getVersion();
-    auto subIt = subMap.find(repVer);
-    assert(subIt != subMap.end() && "rep version should have an entry in subMap!");
-    for (Version sub : subIt->second)
+    assert(repVer < subVec_.size() && !subVec_[repVer].empty() && "rep version should have an entry in subVec_!");
+    for (unsigned sub : subVec_[repVer])
     {
-        versionMap.erase(sub);
-        repMap.erase(sub);
+        if (sub < verVec_.size()) verVec_[sub] = nullptr;
+        if (sub < repVec_.size()) repVec_[sub] = 0;
     }
-    subMap.erase(subIt);
+    subVec_[repVer].clear();
     
     // Remove all edges
     std::vector<VDGEdge*> edges;
@@ -261,7 +217,7 @@ void VDG::moveEdgesToRep(VDGNode* node, VDGNode* rep)
     {
         VDGEdge* edge = *it;
         VDGNode* dstNode = edge->getDstNode();
-        // Use versionMap to get rep node directly, compare pointers
+        // Use verVec_ to get rep node directly, compare pointers
         if (getNode(dstNode->getVersion()) != rep)
             outNonSccEdges.push_back(edge);
         else
@@ -277,15 +233,14 @@ void VDG::moveEdgesToRep(VDGNode* node, VDGNode* rep)
     }
 }
 
-// versions are all the repversions to be merged into repVer
-void VDG::mergeVersionsIntoRep(const VersionSet& versions, Version repVer)
+// versions is a sparse vector of version IDs to be merged into repVer
+void VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
 {
     VDGNode* rep = getNode(repVer);
     
-    // Collect all subs including rep's existing subs
-    VersionSet allSubs;
-    assert(subMap.find(repVer) != subMap.end() && "rep version should have an entry in subMap!");
-    allSubs = subMap[repVer];
+    // Collect all subs including rep's existing subs (move to avoid copy)
+    assert(repVer < subVec_.size() && !subVec_[repVer].empty() && "rep version should have an entry in subVec_!");
+    NodeBS allSubs = std::move(subVec_[repVer]);
     
     // Merge each version into rep
     for (Version v : versions)
@@ -296,36 +251,38 @@ void VDG::mergeVersionsIntoRep(const VersionSet& versions, Version repVer)
         NodeID subNodeId = subNode->getId();
         
         // Get v's subs (including v itself)
-        auto it = subMap.find(v);
-        assert(it != subMap.end() && "sub version should have an entry in subMap before merging!");
-        const VersionSet& vSubs = it->second;
+        assert(v < subVec_.size() && !subVec_[v].empty() && "sub version should have an entry in subVec_ before merging!");
+        const NodeBS& vSubs = subVec_[v];
         
         // Merge properties
         rep->setLoadConsume(subNode->isLoadConsume());
         rep->setStoreYield(subNode->isStoreYield());
         rep->incrementMergedCount(subNode->getMergedCount());
+        rep->mergeStmtReliance(subNode->getStmtRelianceSet());
         
         // Move edges from sub to rep
         moveEdgesToRep(subNode, rep);
         
-        // Update versionMap and repMap for v and all its subs (vSubs includes v)
-        for (Version sub : vSubs)
+        // Update verVec_ and repVec_ for v and all its subs (vSubs includes v)
+        for (unsigned sub : vSubs)
         {
-            versionMap[sub] = rep;
-            repMap[sub] = repVer;
+            if (sub < verVec_.size()) verVec_[sub] = rep;
+            if (sub < repVec_.size()) repVec_[sub] = repVer;
         }
         
-        // Add v's subs to allSubs and remove v from subMap
-        allSubs.insert(vSubs.begin(), vSubs.end());
-        subMap.erase(it);  // Remove v from subMap (no longer a rep)
+        // Add v's subs to allSubs and remove v from subVec_
+        allSubs |= vSubs;
+        subVec_[v].clear();  // Remove v from subVec_ (no longer a rep)
         
         // Delete sub node immediately (no longer needed)
         superNodes[subNodeId] = false;
-        removeGNode(subNode);  // This deletes the node from graph
+        nodeVec[subNodeId] = nullptr;
+        --nodeNum;
+        delete subNode;
     }
     
-    // Update subMap for rep
-    subMap[repVer] = allSubs;
+    // Update subVec_ for rep (move to avoid copy)
+    subVec_[repVer] = std::move(allSubs);
 }
 
 // SCC merge on solid edges and compute topological order
@@ -333,9 +290,9 @@ void VDG::mergeVersionsIntoRep(const VersionSet& versions, Version repVer)
 // consider solid edges only
 // return topo order of SCC reps (solid-edge SCC DAG)
 // @param candidates: if non-empty, only traverse from these node IDs; otherwise traverse all
-NodeVector VDG::sccMergeSolidEdges(NodeSet candidates)
+NodeVector VDG::sccMergeSolidEdges(const NodeVector& candidates)
 {
-    SCCDetection<VDG*> scc(this);
+    VDGSCCDetection scc(this);
     if (candidates.empty())
     {
         scc.find();  // Full graph traversal
@@ -346,7 +303,7 @@ NodeVector VDG::sccMergeSolidEdges(NodeSet candidates)
     }
 
     // Get topological order from SCC detection
-    SCCDetection<VDG*>::GNodeStack topoStack = scc.topoNodeStack();
+    VDGSCCDetection::GNodeStack topoStack = scc.topoNodeStack();
     NodeVector topoOrder;
     topoOrder.reserve(topoStack.size());
     while (!topoStack.empty())
@@ -362,14 +319,15 @@ NodeVector VDG::sccMergeSolidEdges(NodeSet candidates)
         const NodeBS &subs = scc.subNodes(repNodeId);
         if (subs.count() <= 1) continue;
         
-        // Convert NodeIDs to versions for merging
-        VersionSet versionsToMerge;
-        VDGNode* repNode = getGNode(repNodeId);
+        // Convert NodeIDs to versions for merging (sparse vector)
+        NodeVector versionsToMerge;
+        versionsToMerge.reserve(subs.count());
+        VDGNode* repNode = getNodeFast(repNodeId);
         Version repVer = repNode->getVersion();
-        for (NodeID nodeId : subs)
+        for (unsigned nodeId : subs)
         {
-            VDGNode* node = getGNode(nodeId);
-            versionsToMerge.insert(node->getVersion());
+            VDGNode* node = getNodeFast(nodeId);
+            versionsToMerge.push_back(node->getVersion());
         }
         mergeVersionsIntoRep(versionsToMerge, repVer);
     }
@@ -382,7 +340,9 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
     assert(hasPendingUpdates() && "propagateInTopoOrder called with no pending updates!");
 
     // Compute topological order (also does SCC merge)
-    NodeVector topoOrder = sccMergeSolidEdges(getUpdatedNodes());
+    const NodeVector& seedUpdated = getUpdatedNodes();
+    NodeVector topoOrder = sccMergeSolidEdges(seedUpdated);
+    NodeSet updatedSet(seedUpdated.begin(), seedUpdated.end());
 
     // After SCC merge, union pts from all sub-versions into their rep version.
     // This ensures that when versions are merged at runtime (during solving),
@@ -391,18 +351,18 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
     // have no pts data yet, so unionPts is a no-op.
     for (NodeID nodeId : topoOrder)
     {
-        if (!hasGNode(nodeId)) continue;
-        VDGNode* repNode = getGNode(nodeId);
+        if (!hasNodeFast(nodeId)) continue;
+        VDGNode* repNode = getNodeFast(nodeId);
         const Version repV = repNode->getVersion();
-        const VersionSet& subs = getSubVersions(repV);
-        if (subs.size() <= 1) continue;  // No subs to merge pts from
-        for (Version sub : subs)
+        const NodeBS& subs = getSubVersions(repV);
+        if (subs.count() <= 1) continue;  // No subs to merge pts from
+        for (unsigned sub : subs)
         {
             if (sub == repV) continue;
             if (propagate(sub, repV))
             {
                 // pts changed: mark rep for propagation
-                updatedNodes.insert(nodeId);
+                updatedSet.insert(nodeId);
             }
         }
     }
@@ -411,13 +371,13 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
     for (NodeID nodeId : topoOrder)
     {
         // topoOrder contains only SCC rep nodes after merge
-        assert(hasGNode(nodeId) && isSuperNode(nodeId) && "topoOrder should only contain rep nodes!");
+        assert(hasNodeFast(nodeId) && isSuperNode(nodeId) && "topoOrder should only contain rep nodes!");
 
         // Skip if this node doesn't need propagation
-        if (updatedNodes.find(nodeId) == updatedNodes.end())
+        if (updatedSet.find(nodeId) == updatedSet.end())
             continue;
 
-        VDGNode* srcNode = getGNode(nodeId);
+        VDGNode* srcNode = getNodeFast(nodeId);
         const Version srcV = srcNode->getVersion();
         onVersionChanged(srcV);
 
@@ -428,14 +388,15 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
             if (edge->isVirtualEdge())
                 continue;
 
-            VDGNode* dstNode = getGNode(edge->getDstID());
+            VDGNode* dstNode = getNodeFast(edge->getDstID());
             const Version dstV = dstNode->getVersion();
 
             // Call the propagate callback
             if (propagate(srcV, dstV))
             {
                 // Points-to changed, mark for further propagation
-                updatedNodes.insert(edge->getDstID());
+                const NodeID dstId = edge->getDstID();
+                updatedSet.insert(dstId);
             }
         }
     }
@@ -448,13 +409,15 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
 // consider all edges
 void VDG::pruneUnreachableToLoadConsume()
 {
-    NodeBS reachable;
+    const u32_t cap = getNextNodeId();
+    DenseBitVector reachable(cap);
     std::vector<NodeID> worklist;
 
     for (VDG::const_iterator it = begin(), eit = end(); it != eit; ++it)
     {
-        const NodeID id = it->first;
-        VDGNode* node = it->second;
+        const auto kv = *it;
+        const NodeID id = kv.first;
+        VDGNode* node = kv.second;
         if (node->isLoadConsume())
         {
             reachable.set(id);
@@ -466,7 +429,7 @@ void VDG::pruneUnreachableToLoadConsume()
     {
         const NodeID id = worklist.back();
         worklist.pop_back();
-        VDGNode* node = getGNode(id);
+        VDGNode* node = getNodeFast(id);
         for (VDGNode::const_iterator it = node->InEdgeBegin(), eit = node->InEdgeEnd(); it != eit; ++it)
         {
             const NodeID srcId = (*it)->getSrcID();
@@ -481,7 +444,7 @@ void VDG::pruneUnreachableToLoadConsume()
     std::vector<NodeID> repsToRemove;
     for (VDG::const_iterator it = begin(), eit = end(); it != eit; ++it)
     {
-        const NodeID repId = it->first;
+        const NodeID repId = (*it).first;
         if (!isSuperNode(repId) || reachable.test(repId))
             continue;
         repsToRemove.push_back(repId);
@@ -489,7 +452,7 @@ void VDG::pruneUnreachableToLoadConsume()
 
     for (const NodeID repId : repsToRemove)
     {
-        removeNode(getGNode(repId));
+        removeNode(getNodeFast(repId));
     }
 }
 
@@ -497,13 +460,15 @@ void VDG::pruneUnreachableToLoadConsume()
 // consider all edges
 void VDG::pruneUnreachableFromStoreYield()
 {
-    NodeBS reachable;
+    const u32_t cap = getNextNodeId();
+    DenseBitVector reachable(cap);
     std::vector<NodeID> worklist;
 
     for (VDG::const_iterator it = begin(), eit = end(); it != eit; ++it)
     {
-        const NodeID id = it->first;
-        VDGNode* node = it->second;
+        const auto kv = *it;
+        const NodeID id = kv.first;
+        VDGNode* node = kv.second;
         if (node->isStoreYield())
         {
             reachable.set(id);
@@ -515,7 +480,7 @@ void VDG::pruneUnreachableFromStoreYield()
     {
         const NodeID id = worklist.back();
         worklist.pop_back();
-        VDGNode* node = getGNode(id);
+        VDGNode* node = getNodeFast(id);
         for (VDGNode::const_iterator it = node->OutEdgeBegin(), eit = node->OutEdgeEnd(); it != eit; ++it)
         {
             const NodeID dstId = (*it)->getDstID();
@@ -530,10 +495,11 @@ void VDG::pruneUnreachableFromStoreYield()
     std::vector<NodeID> repsToRemove;
     for (VDG::const_iterator it = begin(), eit = end(); it != eit; ++it)
     {
-        const NodeID repId = it->first;
+        const auto kv = *it;
+        const NodeID repId = kv.first;
         if (!isSuperNode(repId) || reachable.test(repId))
             continue;
-        VDGNode* node = it->second;
+        VDGNode* node = kv.second;
         if (node->isLoadConsume())
             continue;
         repsToRemove.push_back(repId);
@@ -541,234 +507,8 @@ void VDG::pruneUnreachableFromStoreYield()
 
     for (const NodeID repId : repsToRemove)
     {
-        removeNode(getGNode(repId));
+        removeNode(getNodeFast(repId));
     }
-}
-
-namespace
-{
-    void reduceByStableReachabilityInternal(VDG &graph,
-                                            bool forward,
-                                            bool seedLoadConsume,
-                                            const std::function<void(NodeID)> &pruneNode)
-    {
-        const u32_t total = graph.getTotalNodeNum();
-        std::vector<NodeBS> must(total);
-        std::vector<NodeBS> may(total);
-        std::vector<bool> inWorklist(total, false);
-        NodeVector worklist;
-
-        for (VDG::const_iterator it = graph.begin(), eit = graph.end(); it != eit; ++it)
-        {
-            const NodeID id = it->first;
-            VDGNode* node = it->second;
-            if (!graph.isSuperNode(id))
-                continue;
-            const bool isSeed = seedLoadConsume ? node->isLoadConsume() : node->isStoreYield();
-            if (isSeed)
-            {
-                must[id].set(id);
-                may[id].set(id);
-                worklist.push_back(id);
-                inWorklist[id] = true;
-            }
-        }
-
-        while (!worklist.empty())
-        {
-            const NodeID id = worklist.back();
-            worklist.pop_back();
-            inWorklist[id] = false;
-            VDGNode* node = graph.getGNode(id);
-            if (!node)
-                continue;
-
-            auto propagateToNeighbor = [&](VDGEdge* edge, NodeID neighborId)
-            {
-                if (!graph.isSuperNode(neighborId))
-                    return;
-                bool changed = false;
-                if (!edge->isVirtualEdge())
-                {
-                    NodeBS &neighborMust = must[neighborId];
-                    const unsigned oldMust = neighborMust.count();
-                    neighborMust |= must[id];
-                    if (neighborMust.count() != oldMust)
-                        changed = true;
-                }
-
-                NodeBS &neighborMay = may[neighborId];
-                const unsigned oldMay = neighborMay.count();
-                neighborMay |= may[id];
-                if (neighborMay.count() != oldMay)
-                    changed = true;
-
-                if (changed && !inWorklist[neighborId])
-                {
-                    worklist.push_back(neighborId);
-                    inWorklist[neighborId] = true;
-                }
-            };
-
-            if (forward)
-            {
-                for (VDGNode::const_iterator it = node->OutEdgeBegin(), eit = node->OutEdgeEnd(); it != eit; ++it)
-                {
-                    VDGEdge* edge = *it;
-                    propagateToNeighbor(edge, edge->getDstID());
-                }
-            }
-            else
-            {
-                for (VDGNode::const_iterator it = node->InEdgeBegin(), eit = node->InEdgeEnd(); it != eit; ++it)
-                {
-                    VDGEdge* edge = *it;
-                    propagateToNeighbor(edge, edge->getSrcID());
-                }
-            }
-        }
-
-        // Prune nodes with empty stable set (Must==May=={})
-        {
-            std::vector<NodeID> toPrune;
-            for (VDG::const_iterator it = graph.begin(), eit = graph.end(); it != eit; ++it)
-            {
-                const NodeID id = it->first;
-                if (!graph.isSuperNode(id))
-                    continue;
-                if (may[id].empty()){
-                    assert(must[id].empty() && "must set should also be empty if may set is empty");
-                    toPrune.push_back(id);
-                }
-            }
-            for (const NodeID id : toPrune)
-            {
-                pruneNode(id);
-            }
-        }
-
-        auto hashNodeBS = [](const NodeBS& bs) -> size_t
-        {
-            size_t h = 0;
-            for (const NodeID id : bs)
-            {
-                h ^= std::hash<NodeID>{}(id) + 0x9e3779b9u + (h << 6) + (h >> 2);
-            }
-            h ^= std::hash<unsigned>{}(bs.count()) + 0x9e3779b9u + (h << 6) + (h >> 2);
-            return h;
-        };
-
-        std::unordered_map<size_t, std::vector<NodeID>> buckets;
-        for (VDG::const_iterator it = graph.begin(), eit = graph.end(); it != eit; ++it)
-        {
-            const NodeID id = it->first;
-            if (!graph.isSuperNode(id))
-                continue;
-            if (must[id] != may[id])
-                continue;
-            buckets[hashNodeBS(must[id])].push_back(id);
-        }
-
-        struct StableGroup
-        {
-            NodeBS stable;
-            std::vector<NodeID> nodes;
-        };
-
-        for (auto &bucket : buckets)
-        {
-            std::vector<StableGroup> groups;
-            for (const NodeID id : bucket.second)
-            {
-                const NodeBS &stable = must[id];
-                bool placed = false;
-                for (StableGroup &group : groups)
-                {
-                    if (stable == group.stable)
-                    {
-                        group.nodes.push_back(id);
-                        placed = true;
-                        break;
-                    }
-                }
-                if (!placed)
-                {
-                    StableGroup group;
-                    group.stable = stable;
-                    group.nodes.push_back(id);
-                    groups.push_back(std::move(group));
-                }
-            }
-
-            for (StableGroup &group : groups)
-            {
-                NodeBS nodesToMerge;
-                for (const NodeID id : group.nodes)
-                    nodesToMerge.set(id);
-
-                if (nodesToMerge.count() <= 1)
-                    continue;
-
-                const unsigned stableCount = group.stable.count();
-                
-                // Convert NodeIDs to versions for merging
-                VersionSet versionsToMerge;
-                for (NodeID nodeId : nodesToMerge)
-                {
-                    VDGNode* node = graph.getGNode(nodeId);
-                    versionsToMerge.insert(node->getVersion());
-                }
-
-                if (stableCount == 1)
-                {
-                    const NodeID stableId = *(group.stable.begin());
-                    VDGNode* stableNode = graph.getGNode(stableId);
-                    graph.mergeVersionsIntoRep(versionsToMerge, stableNode->getVersion());
-                    continue;
-                }
-
-                NodeID repId = group.nodes[0];
-                VDGNode* repNode = graph.getGNode(repId);
-                graph.mergeVersionsIntoRep(versionsToMerge, repNode->getVersion());
-            }
-        }
-    }
-} // namespace
-
-// constraint system: 
-// Must(x)={s| x --solid_edge--> y, s in Must(y)} U {x| x is load-consume}
-// May(x)={s| x --edge--> y, s in May(y)} U {x| x is load-consume}
-// merge x into y: Must(y)=May(y)=May(x)=Must(x)
-// merge x into dst: Must(x)=May(x)={dst}
-// prune x: Must(x)=May(x)={}
-
-void VDG::reduceByStableDstReachability()
-{
-    reduceByStableReachabilityInternal(*this,
-                                       /*forward=*/false,
-                                       /*seedLoadConsume=*/true,
-                                       [this](NodeID id)
-                                       {
-                                            removeNode(getGNode(id));
-                                       });
-}
-
-// constraint system (dual of Dst):
-// Must(x)={s| y --solid_edge--> x, s in Must(y)} U {x| x is store-yield}
-// May(x)={s| y --edge--> x, s in May(y)} U {x| x is store-yield}
-// merge x into y: Must(y)=May(y)=May(x)=Must(x)
-// merge x into src: Must(x)=May(x)={src}
-// prune x: Must(x)=May(x)={}
-
-void VDG::reduceByStableSrcReachability()
-{
-    reduceByStableReachabilityInternal(*this,
-                                       /*forward=*/true,
-                                       /*seedLoadConsume=*/false,
-                                       [this](NodeID id)
-                                       {
-                                            removeNode(getGNode(id));
-                                       });
 }
 
 // Chain contraction:
@@ -777,7 +517,7 @@ void VDG::reduceByStableSrcReachability()
 
 void VDG::chainContraction()
 {
-    const u32_t total = getTotalNodeNum();
+    const u32_t total = getNextNodeId();
     std::vector<bool> inWorklist(total, false);
     std::vector<NodeID> worklist;
 
@@ -795,7 +535,7 @@ void VDG::chainContraction()
     auto enqueueInitial = [&]()
     {
         for (VDG::const_iterator it = begin(), eit = end(); it != eit; ++it)
-            enqueue(it->first);
+            enqueue((*it).first);
     };
 
     auto enqueueInNeighbors = [&](VDGNode* node)
@@ -817,7 +557,7 @@ void VDG::chainContraction()
     // x->y is only out-edge(solid) for x , x is not load-consume => merge x to y
     auto tryMergeForward = [&](NodeID xId) -> bool
     {
-        VDGNode* x = getGNode(xId);
+        VDGNode* x = getNodeFast(xId);
         if (x->isLoadConsume())
             return false;
 
@@ -830,8 +570,7 @@ void VDG::chainContraction()
 
         VDGNode* solidSucc = edge->getDstNode();
 
-        VersionSet toMerge;
-        toMerge.insert(x->getVersion());
+        NodeVector toMerge = { x->getVersion() };
         mergeVersionsIntoRep(toMerge, solidSucc->getVersion());
         enqueueInNeighbors(solidSucc);
         return true;
@@ -840,7 +579,7 @@ void VDG::chainContraction()
     // x->y is only in-edge(solid) for y , y is not store-yield => merge y to x
     auto tryMergeBackward = [&](NodeID yId) -> bool
     {
-        VDGNode* y = getGNode(yId);
+        VDGNode* y = getNodeFast(yId);
         if (y->isStoreYield())
             return false;
 
@@ -853,8 +592,7 @@ void VDG::chainContraction()
 
         VDGNode* solidPred = edge->getSrcNode();
 
-        VersionSet toMerge;
-        toMerge.insert(y->getVersion());
+        NodeVector toMerge = { y->getVersion() };
         mergeVersionsIntoRep(toMerge, solidPred->getVersion());
         enqueueOutNeighbors(solidPred);
         return true;
@@ -870,7 +608,7 @@ void VDG::chainContraction()
 
         if (id >= total)
             continue;
-        if (!hasGNode(id))
+        if (!hasNodeFast(id))
             continue;
         if (!isSuperNode(id))
             continue;
@@ -881,24 +619,23 @@ void VDG::chainContraction()
 }
 
 
-//Todo:
 //c in reach(a)={x|a->b,x in reach(b),b!=c},then a->c is redundant
 void VDG::transitiveRedundancyElimination()
 {
     std::vector<NodeID> topoOrder = sccMergeSolidEdges();
     auto computeReachability = [](VDG &graph,
                                   const std::vector<NodeID> &topoOrder,
-                                  std::vector<NodeBS> &reach)
+                                  std::vector<DenseBitVector> &reach)
     {
-        const u32_t total = graph.getTotalNodeNum();
-        reach.assign(total, NodeBS());
+        const u32_t cap = graph.getNextNodeId();
+        reach.assign(cap, DenseBitVector(cap));
         // Need reverse topo order so successors are processed before predecessors.
         for (auto it = topoOrder.rbegin(); it != topoOrder.rend(); ++it)
         {
             const NodeID id = *it;
             if (!graph.isSuperNode(id))
                 continue;
-            VDGNode* node = graph.getGNode(id);
+            VDGNode* node = graph.getNodeFast(id);
             reach[id].set(id);
             for (VDGNode::const_iterator ei = node->OutEdgeBegin(), eei = node->OutEdgeEnd(); ei != eei; ++ei)
             {
@@ -911,14 +648,15 @@ void VDG::transitiveRedundancyElimination()
         }
     };
 
-    std::vector<NodeBS> reachSolid;
+    std::vector<DenseBitVector> reachSolid;
     computeReachability(*this, topoOrder, reachSolid);
 
     std::vector<VDGEdge*> toRemove;
     for (VDG::const_iterator it = begin(), eit = end(); it != eit; ++it)
     {
-        const NodeID srcId = it->first;
-        VDGNode* node = it->second;
+        const auto kv = *it;
+        const NodeID srcId = kv.first;
+        VDGNode* node = kv.second;
         if (!isSuperNode(srcId))
             continue;
 
@@ -1047,10 +785,10 @@ void VDGManager::dumpStats() const
 
         size_t supernodeCount = 0;
         size_t nodeCount = 0;
-        // Use graph iterator to avoid counting same node multiple times (versionMap can have multiple versions pointing to same rep node)
+        // Use graph iterator to avoid counting same node multiple times (verVec_ can have multiple versions pointing to same rep node)
         for (auto it = graph->begin(); it != graph->end(); ++it)
         {
-            const VDGNode* node = it->second;
+            const VDGNode* node = (*it).second;
             ++nodeCount;
             if (!graph->isSuperNode(node->getId()))
                 continue;
@@ -1182,7 +920,7 @@ void VDGManager::writeToFile(const std::string& filename) const
             // Nodes
             for (auto it = graph.begin(); it != graph.end(); ++it)
             {
-                const VDGNode *node = it->second;
+                const VDGNode *node = (*it).second;
                 if (!graph.isSuperNode(node->getId())) continue;
 
                 out << "    o" << o << "v" << node->getVersion()
@@ -1196,7 +934,7 @@ void VDGManager::writeToFile(const std::string& filename) const
             // Edges
             for (auto it = graph.begin(); it != graph.end(); ++it)
             {
-                const VDGNode *node = it->second;
+                const VDGNode *node = (*it).second;
                 if (!graph.isSuperNode(node->getId())) continue;
 
                 for (auto eit = node->OutEdgeBegin(); eit != node->OutEdgeEnd(); ++eit)

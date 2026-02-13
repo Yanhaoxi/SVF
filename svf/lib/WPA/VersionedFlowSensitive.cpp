@@ -819,16 +819,14 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
                 if(srcY==dstC) continue; // no self-loop
 
                 // 间接调用触发，加入依赖边
-                VDG *graph = vdgManager.getVDG(o);
-                if (graph)
-                {
-                    // Skip if either version was pruned during VDG simplification
-                    if (!graph->hasVersion(srcY) || !graph->hasVersion(dstC)) continue;
-                    // Use addEdge with version (auto-converts to rep)
-                    if(graph->addEdge(srcY, dstC, VDGEdge::IndCallFlow, false)){
-                        // Mark source as updated for batch propagation
-                        vdgManager.markEdgeAdded(o, srcY);
-                    }
+                VDG *graph = vdgManager.tryGetVDG(o);
+                if (!graph) continue;
+                // Skip if either version was pruned during VDG simplification
+                if (!graph->hasVersion(srcY) || !graph->hasVersion(dstC)) continue;
+                // Use addEdge with version (auto-converts to rep)
+                if(graph->addEdge(srcY, dstC, VDGEdge::IndCallFlow, false)){
+                    // Mark source as updated for batch propagation
+                    vdgManager.markEdgeAdded(o, srcY);
                 }
             }
         }
@@ -997,7 +995,8 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
                 const Version y = getYield(l, o);
                 if (y == invalidVersion) continue;
 
-                VDG *graph = vdgManager.getVDG(o);
+                VDG *graph = vdgManager.tryGetVDG(o);
+                if (!graph) continue;
                 if (!graph->hasVersion(c) || !graph->hasVersion(y)) continue;
                 if (graph->addEdge(c, y, VDGEdge::StoreFlow, false))
                 {
@@ -1491,8 +1490,9 @@ void VersionedFlowSensitive::bindStmtRelianceToVDGNodes(void)
         for (const Map<Version, NodeBS>::value_type &vss : *osStmtReliance)
         {
             const Version v = vss.first;
-            if (v == invalidVersion || !graph->hasVersion(v)) continue;
-            const Version repV = graph->getNode(v)->getVersion();
+            if (v == invalidVersion) continue;
+            const Version repV = vdgManager.getRepVersionOrInvalid(o, v);
+            if (repV == invalidVersion) continue;
             repStmtReliance[repV] |= vss.second;
         }
 
