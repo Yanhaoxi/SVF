@@ -107,6 +107,36 @@ void VersionedFlowSensitiveStat::performStat()
     timeStatMap["VDGBuildTime"]      = vfspta->vdgBuildTime;
     timeStatMap["VDGSimplifyTime"]    = vfspta->vdgSimplifyTime;
 
+    // Memory checkpoints captured in VersionedFlowSensitive::initialize() (KB).
+    timeStatMap["VFSMemStartVmRSS"]       = vfspta->memRSSBeforePrelabel;
+    timeStatMap["VFSMemAfterBuildVmRSS"]  = vfspta->memRSSAfterVDGBuild;
+    timeStatMap["VFSMemAfterSimplVmRSS"]  = vfspta->memRSSAfterVDGSimplify;
+    timeStatMap["VFSMemAfterRunVmRSS"]    = vfspta->memRSSAfterRun;
+    timeStatMap["VFSMemStartVmSize"]      = vfspta->memSizeBeforePrelabel;
+    timeStatMap["VFSMemAfterBuildVmSize"] = vfspta->memSizeAfterVDGBuild;
+    timeStatMap["VFSMemAfterSimplVmSize"] = vfspta->memSizeAfterVDGSimplify;
+    timeStatMap["VFSMemAfterRunVmSize"]   = vfspta->memSizeAfterRun;
+    timeStatMap["VFSMemDeltaBuildVmRSS"]  = static_cast<double>(vfspta->memRSSAfterVDGBuild) -
+                                             static_cast<double>(vfspta->memRSSBeforePrelabel);
+    timeStatMap["VFSMemDeltaSimplVmRSS"]  = static_cast<double>(vfspta->memRSSAfterVDGSimplify) -
+                                             static_cast<double>(vfspta->memRSSAfterVDGBuild);
+    timeStatMap["VFSMemDeltaTotalVmRSS"]  = static_cast<double>(vfspta->memRSSAfterVDGSimplify) -
+                                             static_cast<double>(vfspta->memRSSBeforePrelabel);
+    timeStatMap["VFSMemDeltaEndVmRSS"]    = static_cast<double>(vfspta->memRSSAfterRun) -
+                                             static_cast<double>(vfspta->memRSSAfterVDGSimplify);
+    timeStatMap["VFSMemDeltaAllVmRSS"]    = static_cast<double>(vfspta->memRSSAfterRun) -
+                                             static_cast<double>(vfspta->memRSSBeforePrelabel);
+    timeStatMap["VFSMemDeltaBuildVmSize"] = static_cast<double>(vfspta->memSizeAfterVDGBuild) -
+                                             static_cast<double>(vfspta->memSizeBeforePrelabel);
+    timeStatMap["VFSMemDeltaSimplVmSize"] = static_cast<double>(vfspta->memSizeAfterVDGSimplify) -
+                                             static_cast<double>(vfspta->memSizeAfterVDGBuild);
+    timeStatMap["VFSMemDeltaTotalVmSize"] = static_cast<double>(vfspta->memSizeAfterVDGSimplify) -
+                                             static_cast<double>(vfspta->memSizeBeforePrelabel);
+    timeStatMap["VFSMemDeltaEndVmSize"]   = static_cast<double>(vfspta->memSizeAfterRun) -
+                                             static_cast<double>(vfspta->memSizeAfterVDGSimplify);
+    timeStatMap["VFSMemDeltaAllVmSize"]   = static_cast<double>(vfspta->memSizeAfterRun) -
+                                             static_cast<double>(vfspta->memSizeBeforePrelabel);
+
     PTNumStatMap["TotalPointers"]  = pag->getValueNodeNum();
     PTNumStatMap["TotalObjects"]   = pag->getObjectNodeNum();
 

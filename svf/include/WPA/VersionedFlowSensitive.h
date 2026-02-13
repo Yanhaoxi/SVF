@@ -217,6 +217,8 @@ private:
     void expandEquivalentObjectVersions(void);
     void buildVersionDependencyGraphs(void);
     void simplifyVDGGraphs(void);
+    /// Materialize stmt reliance onto (already-merged) VDG rep nodes.
+    void bindStmtRelianceToVDGNodes(void);
     
     inline VDGManager& getVDGManager()
     {
@@ -278,6 +280,21 @@ private:
     /// Compared before use; if srcPts unchanged, skip recomputation.
     Map<NodeID, PointsTo> gepPtsCache;
 
+    /// Lazy-init constant object cache: 0=unknown, 1=constant, 2=non-constant.
+    /// Avoids upfront scan of all PAG nodes; populated on first query per object.
+    mutable std::vector<u8_t> constantObjCache;
+
+    /// Lazy check whether an object is constant (cached after first call)
+    inline bool isConstantObjCached(NodeID id) const
+    {
+        if (id >= constantObjCache.size())
+            constantObjCache.resize(id + 1, 0);
+        u8_t &entry = constantObjCache[id];
+        if (entry == 0)
+            entry = pag->isConstantObj(id) ? 1 : 2;
+        return entry == 1;
+    }
+
     Set<NodeID> prelabeledObjects;
 
     /// Points-to DS for working with versions.
@@ -308,6 +325,16 @@ private:
     double versionPropTime;  ///< Time to propagate versions to versions which rely on them.
     double vdgBuildTime;     ///< Time to build VDG after meld labeling.
     double vdgSimplifyTime;  ///< Time to simplify VDG.
+
+    /// Memory checkpoints in KB (captured during initialize()).
+    u32_t memRSSBeforePrelabel;      ///< VmRSS before prelabel/meld/build pipeline.
+    u32_t memSizeBeforePrelabel;     ///< VmSize before prelabel/meld/build pipeline.
+    u32_t memRSSAfterVDGBuild;       ///< VmRSS after buildVersionDependencyGraphs().
+    u32_t memSizeAfterVDGBuild;      ///< VmSize after buildVersionDependencyGraphs().
+    u32_t memRSSAfterVDGSimplify;    ///< VmRSS after simplifyVDGGraphs().
+    u32_t memSizeAfterVDGSimplify;   ///< VmSize after simplifyVDGGraphs().
+    u32_t memRSSAfterRun;            ///< VmRSS at run end (just before finalize stats).
+    u32_t memSizeAfterRun;           ///< VmSize at run end (just before finalize stats).
     //@}
 
     static VersionedFlowSensitive *vfspta;
