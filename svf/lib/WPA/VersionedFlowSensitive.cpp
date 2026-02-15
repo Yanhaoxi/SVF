@@ -47,12 +47,6 @@ namespace
         graph.pruneUnreachableFromStoreYield();
     }
 
-    // void vdgSimplifyStableReach(VDG &graph)
-    // {
-    //     graph.reduceByStableDstReachability();
-    //     graph.reduceByStableSrcReachability();
-    // }
-
     void vdgSimplifyChainContraction(VDG &graph)
     {
         graph.chainContraction();
@@ -818,13 +812,13 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
                 if (dstC == invalidVersion) continue;
                 if(srcY==dstC) continue; // no self-loop
 
-                // 间接调用触发，加入依赖边
+                // 间接调用触发，加入结构边（VDG不再记录边来源 kind）
                 VDG *graph = vdgManager.tryGetVDG(o);
                 if (!graph) continue;
                 // Skip if either version was pruned during VDG simplification
                 if (!graph->hasVersion(srcY) || !graph->hasVersion(dstC)) continue;
                 // Use addEdge with version (auto-converts to rep)
-                if(graph->addEdge(srcY, dstC, VDGEdge::IndCallFlow, false)){
+                if(graph->addEdge(srcY, dstC, false)){
                     // Mark source as updated for batch propagation
                     vdgManager.markEdgeAdded(o, srcY);
                 }
@@ -998,7 +992,7 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
                 VDG *graph = vdgManager.tryGetVDG(o);
                 if (!graph) continue;
                 if (!graph->hasVersion(c) || !graph->hasVersion(y)) continue;
-                if (graph->addEdge(c, y, VDGEdge::StoreFlow, false))
+                if (graph->addEdge(c, y, false))
                 {
                     vdgManager.markEdgeAdded(o, c);
                 }
@@ -1244,9 +1238,39 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
             VDG &graph = getGraph(o);
             graph.getOrAddNode(srcY, false, false);
             graph.getOrAddNode(dstC, false, false);
-            graph.addEdge(srcY, dstC, VDGEdge::IndCallFlow, true);
+            // This edge comes from indirect-call wiring; VDG keeps only virtual/solid property.
+            graph.addEdge(srcY, dstC, true);
         }
     };
+
+    for (const VersionRelianceRefMap::value_type &ovrvRef : versionRelianceRef)
+    {
+        const NodeID o = ovrvRef.first;
+        const Map<Version, std::vector<Version>> *osVersionReliance = ovrvRef.second;
+        if (osVersionReliance == nullptr) continue;
+
+        for (const Map<Version, std::vector<Version>>::value_type &vrv : *osVersionReliance)
+        {
+            const Version v = vrv.first;
+            if (v == invalidVersion) continue;
+            for (const Version rv : vrv.second)
+            {
+                if (rv == invalidVersion) continue;
+                if (v == rv)
+                {
+                    continue;
+                }
+                VDG &graph = getGraph(o);
+                graph.getOrAddNode(v, false, false);
+                graph.getOrAddNode(rv, false, false);
+                graph.addEdge(v, rv, false);
+            }
+        }
+    }
+
+    // Version reliance map is no longer needed once dependence edges are materialized.
+    versionRelianceRef.clear();
+    VersionRelianceMap().swap(versionReliance);
 
     for (NodeID l = 0; l < consume.size(); ++l)
     {
@@ -1265,18 +1289,6 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
         }
 
         const ObjToVersionMap &yieldMap = yield[l];
-        if (!yieldMap.empty())
-        {
-            const bool storeYield = isStore(l);
-            // 对所有yield的version建立节点
-            for (const ObjToVersionMap::value_type &ov : yieldMap)
-            {
-                const Version v = ov.second;
-                if (v == invalidVersion) continue;
-                VDG &graph = getGraph(ov.first);
-                graph.getOrAddNode(v, false, storeYield);
-            }
-        }
 
         if (isStore(l))
         {
@@ -1305,8 +1317,10 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                     if (b == invalidVersion) continue;
                     VDG &graph = getGraph(o);
                     // 版本一致无需建边
-                    if (a == b)
+                    if (a == b){
+                        graph.getOrAddNode(a, false, true);
                         continue;
+                    }
                     graph.getOrAddNode(a, false, false);
                     const NodeID q = store->getPAGSrcNodeID();
                     const PointsTo &srcPts = ander->getPts(q);
@@ -1315,10 +1329,11 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
                     else
                         graph.getOrAddNode(b, false, true);
 
+                    // Store-flow relation is encoded structurally (kind is intentionally dropped).
                     if (nonSingletonObj)
-                        graph.addEdge(a, b, VDGEdge::StoreFlow, false);
+                        graph.addEdge(a, b, false);
                     else
-                        graph.addEdge(a, b, VDGEdge::StoreFlow, true);
+                        graph.addEdge(a, b, true);
                 }
             }
         }
@@ -1374,34 +1389,6 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
 
     }
 
-    for (const VersionRelianceRefMap::value_type &ovrvRef : versionRelianceRef)
-    {
-        const NodeID o = ovrvRef.first;
-        const Map<Version, std::vector<Version>> *osVersionReliance = ovrvRef.second;
-        if (osVersionReliance == nullptr) continue;
-
-        for (const Map<Version, std::vector<Version>>::value_type &vrv : *osVersionReliance)
-        {
-            const Version v = vrv.first;
-            if (v == invalidVersion) continue;
-            for (const Version rv : vrv.second)
-            {
-                if (rv == invalidVersion) continue;
-                if (v == rv)
-                {
-                    continue;
-                }
-                VDG &graph = getGraph(o);
-                graph.getOrAddNode(v, false, false);
-                graph.getOrAddNode(rv, false, false);
-                graph.addEdge(v, rv, VDGEdge::Depend, false);
-            }
-        }
-    }
-
-    // Version reliance map is no longer needed once dependence edges are materialized.
-    versionRelianceRef.clear();
-    VersionRelianceMap().swap(versionReliance);
 
     double end = stat->getClk(true);
     vdgBuildTime = (end - start) / TIMEINTERVAL;
@@ -1413,7 +1400,6 @@ void VersionedFlowSensitive::simplifyVDGGraphs(void)
 
     std::vector<VDGSimplifyPass> passes;
     registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
-    // registerVDGSimplifyPass(passes, vdgSimplifyStableReach);
     registerVDGSimplifyPass(passes, vdgSimplifyPrune);
     registerVDGSimplifyPass(passes, vdgSimplifyTransRedundancy);
     registerVDGSimplifyPass(passes, vdgSimplifyChainContraction);

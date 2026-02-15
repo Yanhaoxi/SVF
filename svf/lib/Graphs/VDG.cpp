@@ -70,7 +70,6 @@ void VDG::logEdgeChange(const char* tag, const VDGEdge* edge)
     SVFUtil::outs() << "[VDG] " << tag
                     << " (obj=" << objId << ",v=" << src->getVersion() << ")"
                     << " -> (obj=" << objId << ",v=" << dst->getVersion() << ")"
-                    << " kind=" << static_cast<unsigned>(edge->getVDGEdgeKind())
                     << " virtual=" << edge->isVirtualEdge() << "\n";
 #else
     (void)tag;
@@ -119,10 +118,9 @@ void VDG::reTargetDstOfEdge(VDGEdge* edge, VDGNode* newDst)
         removeVDGEdge(edge);
         return;
     }
-    VDGEdge::VDGEdgeK kind = edge->getVDGEdgeKind();
     bool isVirtual = edge->isVirtualEdge();
     removeVDGEdge(edge);
-    addEdgeInternal(src, newDst, kind, isVirtual);
+    addEdgeInternal(src, newDst, isVirtual);
 }
 
 void VDG::reTargetSrcOfEdge(VDGEdge* edge, VDGNode* newSrc)
@@ -133,10 +131,9 @@ void VDG::reTargetSrcOfEdge(VDGEdge* edge, VDGNode* newSrc)
         removeVDGEdge(edge);
         return;
     }
-    VDGEdge::VDGEdgeK kind = edge->getVDGEdgeKind();
     bool isVirtual = edge->isVirtualEdge();
     removeVDGEdge(edge);
-    addEdgeInternal(newSrc, dst, kind, isVirtual);
+    addEdgeInternal(newSrc, dst, isVirtual);
 }
 
 void VDG::removeVDGEdge(VDGEdge* edge)
@@ -257,7 +254,6 @@ void VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
         // Merge properties
         rep->setLoadConsume(subNode->isLoadConsume());
         rep->setStoreYield(subNode->isStoreYield());
-        rep->incrementMergedCount(subNode->getMergedCount());
         rep->mergeStmtReliance(subNode->getStmtRelianceSet());
         
         // Move edges from sub to rep

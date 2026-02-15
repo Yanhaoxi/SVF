@@ -53,14 +53,8 @@ typedef GenericEdge<VDGNode> GenericVDGEdgeTy;
 class VDGEdge : public GenericVDGEdgeTy
 {
 public:
-    // virtual => may / flow solid => must flow
-    // kind => src to dst edge kind (from direct dependency/store flow/indirect call)
-    enum VDGEdgeK
-    {
-        Depend = 1 << 0,
-        StoreFlow = 1 << 1,
-        IndCallFlow = 1 << 2
-    };
+    // virtual => may-flow edge, solid => must-flow edge.
+    // Edge provenance (depend/store/ind-call) is intentionally not stored.
 
     // NOTE: equalGEdge must be defined BEFORE VDGEdgeSetTy to ensure
     // GenericNode uses this comparator instead of the base class version
@@ -83,32 +77,9 @@ public:
 
     ~VDGEdge() override = default;
 
-    inline VDGEdgeK getVDGEdgeKind() const
-    {
-        return static_cast<VDGEdgeK>(getEdgeKind() & KindMask);
-    }
-
-    inline bool isStoreEdge() const
-    {
-        return hasKind(StoreFlow);
-    }
-
-    inline bool hasKind(VDGEdgeK kind) const
-    {
-        return (static_cast<u8_t>(getVDGEdgeKind()) & static_cast<u8_t>(kind)) != 0;
-    }
-
-    inline void addKind(VDGEdgeK kind)
-    {
-        const GEdgeFlag cur = getEdgeKindWithoutMask();
-        const GEdgeFlag merged = (static_cast<GEdgeFlag>(getVDGEdgeKind())
-            | static_cast<GEdgeFlag>(kind)) & KindMask;
-        setEdgeFlag((cur & ~KindMask) | merged);
-    }
-
     inline void setVirtual(bool isVirtual)
     {
-        const GEdgeFlag cur = getEdgeKindWithoutMask();
+        const GEdgeFlag cur = getEdgeKind();
         if (isVirtual)
             setEdgeFlag(cur | VirtualEdgeFlag);
         else
@@ -117,19 +88,16 @@ public:
 
     inline bool isVirtualEdge() const
     {
-        return (getEdgeKindWithoutMask() & VirtualEdgeFlag) != 0;
+        return (getEdgeKind() & VirtualEdgeFlag) != 0;
     }
 
 protected:
     static constexpr GEdgeFlag VirtualEdgeFlag = (1ULL << (EdgeKindMaskBits - 1));
-    static constexpr GEdgeFlag KindMask = VirtualEdgeFlag - 1;
 
 private:
     friend class VDG;
-    VDGEdge(VDGNode *src, VDGNode *dst, VDGEdgeK kind, bool isVirtual = false)
-        : GenericVDGEdgeTy(src, dst,
-                           (static_cast<GEdgeFlag>(kind) & KindMask)
-                           | (isVirtual ? VirtualEdgeFlag : 0))
+    VDGEdge(VDGNode *src, VDGNode *dst, bool isVirtual = false)
+        : GenericVDGEdgeTy(src, dst, isVirtual ? VirtualEdgeFlag : 0)
     {
     }
 };
@@ -146,8 +114,7 @@ public:
         : GenericVDGNodeTy(id, k),
           version(ver),
           loadConsume(loadConsume),
-          storeYield(storeYield),
-          mergedCount(1)  // Initially represents 1 version (itself)
+          storeYield(storeYield)
     {
     }
 
@@ -178,28 +145,10 @@ public:
         storeYield = storeYield || value;
     }
 
-    /// Get number of versions merged into this rep node
-    inline u32_t getMergedCount() const
-    {
-        return mergedCount;
-    }
-
-    /// Increment merged count when merging another version
-    inline void incrementMergedCount(u32_t count = 1)
-    {
-        mergedCount += count;
-    }
-
     /// Get statement reliance set bound to this node's version.
     inline const NodeBS& getStmtRelianceSet() const
     {
         return stmtReliance;
-    }
-
-    /// Add one statement into this node's reliance set.
-    inline void addStmtReliance(NodeID stmt)
-    {
-        stmtReliance.set(stmt);
     }
 
     /// Merge another reliance set into this node.
@@ -258,7 +207,6 @@ private:
     Version version;
     bool loadConsume;
     bool storeYield;
-    u32_t mergedCount;  ///< Number of versions merged into this rep node
     NodeBS stmtReliance; ///< Statements relying on this (rep) version
 };
 
@@ -364,8 +312,6 @@ public:
     void mergeVersionsIntoRep(const NodeVector& versions, Version repVer);
     void pruneUnreachableToLoadConsume();
     void pruneUnreachableFromStoreYield();
-    void reduceByStableDstReachability();
-    void reduceByStableSrcReachability();
     void chainContraction();
     void transitiveRedundancyElimination();
 
@@ -459,21 +405,9 @@ public:
         return verVec_[ver];
     }
 
-    /// Try get node (returns nullptr if not exists)
-    inline VDGNode* tryGetNode(Version ver)
-    {
-        return (ver < verVec_.size()) ? verVec_[ver] : nullptr;
-    }
-
     inline bool hasVersion(Version ver) const
     {
         return ver < verVec_.size() && verVec_[ver] != nullptr;
-    }
-
-    /// Get the version vector capacity (max version + 1)
-    inline size_t getVersionCapacity() const
-    {
-        return verVec_.size();
     }
 
     //===--- Rep/Sub Version Management ---===//
@@ -483,12 +417,6 @@ public:
     {
         assert(v < repVec_.size() && "version out of range in getRepVersion!");
         return repVec_[v] != 0 ? repVec_[v] : v;
-    }
-
-    /// Check if version is a rep version (repVec_[v]==0 means self-rep)
-    inline bool isRepVersion(Version v) const
-    {
-        return v < repVec_.size() && repVec_[v] == 0;
     }
 
     /// Get all sub versions for a rep (including self)
@@ -527,71 +455,16 @@ public:
 
     //===--- Edge Operations ---===//
 
-    /// Deep-copy this VDG for a different object ID.
-    /// Creates an independent copy with identical structure (nodes, edges, rep/sub maps).
-    inline std::unique_ptr<VDG> clone(NodeID newObjId) const
-    {
-        auto copy = std::make_unique<VDG>(newObjId);
-        copy->nextNodeId = nextNodeId;
-        copy->superNodes = superNodes;
-        copy->repVec_ = repVec_;
-        copy->subVec_ = subVec_;
-        copy->nodeVec.resize(nodeVec.size(), nullptr);
-        copy->nodeNum = nodeNum;
-        copy->verVec_.resize(verVec_.size(), nullptr);
-
-        // Copy nodes
-        for (auto it = begin(), eit = end(); it != eit; ++it)
-        {
-            const VDGNode* origNode = (*it).second;
-            VDGNode* newNode = new VDGNode(origNode->getId(), origNode->getVersion(),
-                                           origNode->isLoadConsume(), origNode->isStoreYield());
-            newNode->incrementMergedCount(origNode->getMergedCount() - 1);
-            newNode->mergeStmtReliance(origNode->getStmtRelianceSet());
-            copy->nodeVec[newNode->getId()] = newNode;
-            copy->verVec_[origNode->getVersion()] = newNode;
-        }
-
-        // Rebuild verVec_ for sub versions pointing to rep nodes
-        for (size_t v = 0; v < repVec_.size(); ++v)
-        {
-            if (repVec_[v] != 0)  // v is a sub version
-            {
-                Version repV = repVec_[v];
-                if (repV < copy->verVec_.size() && copy->verVec_[repV] != nullptr)
-                    copy->verVec_[v] = copy->verVec_[repV];
-            }
-        }
-
-        // Copy edges
-        for (auto it = begin(), eit = end(); it != eit; ++it)
-        {
-            const VDGNode* origSrc = (*it).second;
-            for (auto ei = origSrc->OutEdgeBegin(), eei = origSrc->OutEdgeEnd(); ei != eei; ++ei)
-            {
-                const VDGEdge* origEdge = *ei;
-                VDGNode* newSrc = copy->getNodeFast(origEdge->getSrcID());
-                VDGNode* newDst = copy->getNodeFast(origEdge->getDstID());
-                VDGEdge* newEdge = new VDGEdge(newSrc, newDst,
-                                               origEdge->getVDGEdgeKind(),
-                                               origEdge->isVirtualEdge());
-                newSrc->addOutgoingEdgeWithKind(newEdge);
-                newDst->addIncomingEdgeWithKind(newEdge);
-            }
-        }
-
-        return copy;
-    }
-
     /// Add edge between versions (auto-converts to rep versions via getNode)
-    /// Returns true if a new solid edge is added or virtual edge becomes solid
+    /// Returns true if a new solid edge is added or a virtual edge is upgraded to solid.
+    /// Note: the graph no longer stores per-edge provenance kind.
     /// This is the only public edge API to ensure rep node semantics
-    inline bool addEdge(Version srcV, Version dstV, VDGEdge::VDGEdgeK kind, bool isVirtual)
+    inline bool addEdge(Version srcV, Version dstV, bool isVirtual)
     {
         VDGNode* src = getNode(srcV);  // getNode returns rep node via verVec_
         VDGNode* dst = getNode(dstV);
         if (src == dst) return false;  // No self-loop
-        return addEdgeInternal(src, dst, kind, isVirtual);
+        return addEdgeInternal(src, dst, isVirtual);
     }
 
     /// Delete node from graph by NodeID (frees memory)
@@ -618,20 +491,19 @@ private:
     void moveEdgesToRep(VDGNode* node, VDGNode* rep);
 
     /// Internal edge addition between rep nodes (private to ensure rep node semantics)
-    inline bool addEdgeInternal(VDGNode *src, VDGNode *dst, VDGEdge::VDGEdgeK kind, bool isVirtual)
+    inline bool addEdgeInternal(VDGNode *src, VDGNode *dst, bool isVirtual)
     {
         assert(src != dst && "VDG edge should not be a self-loop");
         VDGEdge *edge = findEdge(src, dst);
         if (edge)
         {
-            edge->addKind(kind);
             if (!isVirtual && edge->isVirtualEdge())
             {
                 return updateEdgeVirtual(edge, false); 
             }
             return false;
         }
-        edge = new VDGEdge(src, dst, kind, isVirtual);
+        edge = new VDGEdge(src, dst, isVirtual);
         src->addOutgoingEdgeWithKind(edge);
         dst->addIncomingEdgeWithKind(edge);
         logEdgeChange("add", edge);
@@ -640,7 +512,7 @@ private:
 
     VDGEdge* findEdge(const VDGNode *src, const VDGNode *dst) const
     {
-        VDGEdge edge(const_cast<VDGNode*>(src), const_cast<VDGNode*>(dst), VDGEdge::Depend, false);
+        VDGEdge edge(const_cast<VDGNode*>(src), const_cast<VDGNode*>(dst), false);
         const VDGNode::VDGEdgeSetTy &edges = src->getOutEdges();
         VDGNode::VDGEdgeSetTy::const_iterator it = edges.find(&edge);
         return it == edges.end() ? nullptr : *it;
@@ -850,16 +722,6 @@ public:
     inline bool hasVDG(NodeID obj) const
     {
         return vdgMap.find(obj) != vdgMap.end();
-    }
-
-    /// Deep-copy a canonical object's VDG to a new object ID.
-    /// Each object gets its own independent VDG that can evolve separately during solving.
-    inline void copyVDGForObj(NodeID srcObj, NodeID dstObj)
-    {
-        assert(srcObj != dstObj && "VDGManager: cannot copy VDG to same object!");
-        auto it = vdgMap.find(srcObj);
-        assert(it != vdgMap.end() && "VDGManager: source VDG not found!");
-        vdgMap[dstObj] = it->second->clone(dstObj);
     }
 
     /// Mark a version as updated, add obj to pending queue
