@@ -38,9 +38,11 @@ private:
     typedef CoreBitVector MeldVersion;
 
 public:
-    typedef Map<NodeID, Version> ObjToVersionMap;
-
-    typedef std::vector<ObjToVersionMap> LocVersionMap;
+    /// Per-object location-version map: l -> v.
+    typedef Map<NodeID, Version> LocToVersionMap;
+    typedef std::shared_ptr<LocToVersionMap> LocToVersionMapPtr;
+    /// Object-indexed version map (o:l:v): o -> shared(l -> v).
+    typedef Map<NodeID, LocToVersionMapPtr> ObjToLocVersionMap;
     /// (o -> (v -> versions with rely on o:v).
     typedef Map<NodeID, Map<Version, std::vector<Version>>> VersionRelianceMap;
     typedef Map<NodeID, const Map<Version, std::vector<Version>> *> VersionRelianceRefMap;
@@ -150,7 +152,7 @@ public:
     virtual bool isLoad(const NodeID l) const;
 
     /// Shared code for getConsume and getYield. They wrap this function.
-    Version getVersion(const NodeID l, const NodeID o, const LocVersionMap &lvm) const;
+    Version getVersion(const NodeID l, const NodeID o, const ObjToLocVersionMap &lvm) const;
 
     /// Returns the consumed version of o at l. If no such version exists, returns invalidVersion.
     Version getConsume(const NodeID l, const NodeID o) const;
@@ -206,7 +208,7 @@ private:
     virtual bool deltaSource(const NodeID l) const;
 
     /// Shared code for setConsume and setYield. They wrap this function.
-    void setVersion(const NodeID l, const NodeID o, const Version v, LocVersionMap &lvm);
+    void setVersion(const NodeID l, const NodeID o, const Version v, ObjToLocVersionMap &lvm);
 
     /// Sets the consumed version of o at l to v.
     void setConsume(const NodeID l, const NodeID o, const Version v);
@@ -216,7 +218,6 @@ private:
 
     void expandEquivalentObjectVersions(void);
     void buildVersionDependencyGraphs(void);
-    void simplifyVDGGraphs(void);
     /// Materialize stmt reliance onto (already-merged) VDG rep nodes.
     void bindStmtRelianceToVDGNodes(void);
     
@@ -231,11 +232,13 @@ private:
     /// Propagate versions batch-wise on all updated VDGs
     void propagateAllVersions();
 
-    /// Maps locations to objects to a version. The object version is what is
-    /// consumed at that location.
-    LocVersionMap consume;
-    /// Actual yield map. Yield analogue to consume.
-    LocVersionMap yield;
+    /// Consumed versions in object-major layout (o:l:v).
+    ObjToLocVersionMap consume;
+    /// Yielded versions in object-major layout (o:l:v, store-specific).
+    ObjToLocVersionMap yield;
+    /// Store-location indexed pending singleton objects whose consume->yield edge
+    /// may still need virtual->solid upgrade during solving.
+    Map<NodeID, NodeVector> pendingStoreObjsByLoc;
 
     /// Version dependency graph manager
     VDGManager vdgManager;
@@ -254,6 +257,12 @@ private:
     // up those for o' instead.
     Map<NodeID, NodeID> equivalentObject;
 
+    inline NodeID canonicalObject(const NodeID o) const
+    {
+        const Map<NodeID, NodeID>::const_iterator it = equivalentObject.find(o);
+        return it == equivalentObject.end() ? o : it->second;
+    }
+
     /// Worklist for performing meld labeling, takes SVFG node l.
     /// Nodes are added when the version they yield is changed.
     FIFOWorkList<NodeID> vWorklist;
@@ -266,19 +275,10 @@ private:
 
     //===--- Caching ---===//
 
-    /// Load cache: SVFG load location -> cached qpt (points-to of q at this load site).
-    /// Single-level map keyed by loc. Invalidated by erasing key when load is
-    /// re-queued via stmtRelianceCallback.
-    Map<NodeID, PointsTo> loadPtsCache;
-
-    /// Store SU cache: SVFG store location -> cache level.
-    /// Monotonically increasing: 0=unvisited, 1=singleton_SU, 2=non-SU (stable).
-    /// Never invalidated — levels only go up.
-    Map<NodeID, u8_t> storeSUCache;
-
-    /// GEP cache: GEP SVFG node ID -> last seen srcPts.
-    /// Compared before use; if srcPts unchanged, skip recomputation.
-    Map<NodeID, PointsTo> gepPtsCache;
+    /// Unified stmt points-to cache by SVFG node id (used by load/gep deltas).
+    /// For loads: cache stores seen qpt; bits are selectively reset on reliance.
+    /// For geps: cache stores seen srcPts.
+    std::vector<PointsTo> stmtPtsCache;
 
     /// Lazy-init constant object cache: 0=unknown, 1=constant, 2=non-constant.
     /// Avoids upfront scan of all PAG nodes; populated on first query per object.

@@ -201,17 +201,18 @@ void VersionedFlowSensitiveStat::versionStat(void)
     _MaxVersions = 0;
 
     u32_t totalVersionPtsSize = 0;
-    for (const VersionedFlowSensitive::LocVersionMap *lvm :
+    for (const VersionedFlowSensitive::ObjToLocVersionMap *lvm :
             {
                 &vfspta->consume, &vfspta->yield
             })
     {
-        for (const VersionedFlowSensitive::ObjToVersionMap  &lov : *lvm)
+        for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ovm : *lvm)
         {
-            for (const VersionedFlowSensitive::ObjToVersionMap::value_type &ov : lov)
+            const NodeID o = ovm.first;
+            if (!ovm.second) continue;
+            for (const VersionedFlowSensitive::LocToVersionMap::value_type &lv : *(ovm.second))
             {
-                const NodeID o = ov.first;
-                const Version v = ov.second;
+                const Version v = lv.second;
 
                 ++_NumVersions;
 
