@@ -325,16 +325,6 @@ private:
     double versionPropTime;  ///< Time to propagate versions to versions which rely on them.
     double vdgBuildTime;     ///< Time to build VDG after meld labeling.
     double vdgSimplifyTime;  ///< Time to simplify VDG.
-
-    /// Memory checkpoints in KB (captured during initialize()).
-    u32_t memRSSBeforePrelabel;      ///< VmRSS before prelabel/meld/build pipeline.
-    u32_t memSizeBeforePrelabel;     ///< VmSize before prelabel/meld/build pipeline.
-    u32_t memRSSAfterVDGBuild;       ///< VmRSS after buildVersionDependencyGraphs().
-    u32_t memSizeAfterVDGBuild;      ///< VmSize after buildVersionDependencyGraphs().
-    u32_t memRSSAfterVDGSimplify;    ///< VmRSS after simplifyVDGGraphs().
-    u32_t memSizeAfterVDGSimplify;   ///< VmSize after simplifyVDGGraphs().
-    u32_t memRSSAfterRun;            ///< VmRSS at run end (just before finalize stats).
-    u32_t memSizeAfterRun;           ///< VmSize at run end (just before finalize stats).
     //@}
 
     static VersionedFlowSensitive *vfspta;

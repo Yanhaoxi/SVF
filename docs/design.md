@@ -187,11 +187,7 @@ VDG 增加显式状态：
 ## 13. Validation Checklist
 1. 语义回归：`wpa -vfspta` 关键 benchmark 结果一致。
 2. 图规模回归：init/simplified 节点与边数量趋势合理。
-3. 内存回归：
-   - `VFSMemAfterBuild*`
-   - `VFSMemAfterSimpl*`
-   - `VFSMemAfterRun*`
-   - `VFSMemDelta*`
+3. 内存回归：当前版本不统计 VFS 内存 checkpoint。
 4. 性能回归：
    - `meld/build/simplify/propagate` 分阶段耗时
    - 总耗时

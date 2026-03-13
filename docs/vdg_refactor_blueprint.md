@@ -159,11 +159,7 @@
 每轮改动至少检查：
 1. 语义一致性：`wpa -vfspta` 结果不回退（关键 case）。
 2. 图规模变化：init/simplified 节点边数量趋势合理。
-3. 内存指标：
-   - `VFSMemAfterBuild*`
-   - `VFSMemAfterSimpl*`
-   - `VFSMemAfterRun*`
-   - `VFSMemDelta*`
+3. 内存指标：当前版本不统计 VFS 内存 checkpoint。
 4. 性能：总耗时 + 关键阶段耗时（`meld/build/simplify/propagate`）。
 
 ## 9. 待确认决策
