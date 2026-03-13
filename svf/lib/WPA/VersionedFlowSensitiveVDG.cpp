@@ -257,6 +257,7 @@ void VersionedFlowSensitive::meldLabel(void)
             std::vector<int> partOf;
             std::vector<const IndirectSVFGEdge *> footprint;
             unsigned numSCCs = SCC::detectSCCs(this, this->svfg, o, osStartingNodes, partOf, footprint);
+            this->recordStmt(footprint.size());
 
             // 2. Skip any further processing of a footprint we have seen before.
             {
@@ -399,6 +400,325 @@ void VersionedFlowSensitive::meldLabel(void)
             storesYieldedMeldVersion.clear();
 
             mvv.clear();
+            this->recordVersion(curVersion);
+
+            // 6. From SCC reliance, determine version reliances.
+            Map<Version, std::vector<Version>> &osVersionReliance = this->versionReliance.at(o);
+            for (u32_t scc = 0; scc < numSCCs; ++scc)
+            {
+                if (sccReliance[scc].empty()) continue;
+
+                // Some consume relies on a yield. When it's a store, we need to pick whether to
+                // use the consume or yield unlike when it is not because they are the same.
+                const Version version
+                    = storeSCC[scc] != -1 ? storesYieldedVersion[storeSCC[scc]] : sccToVersion[scc];
+
+                std::vector<Version> &reliantVersions = osVersionReliance[version];
+                for (const int reliantSCC : sccReliance[scc])
+                {
+                    const Version reliantVersion = sccToVersion[reliantSCC];
+                    if (version != reliantVersion)
+                    {
+                        // sccReliance is a set, no need to worry about duplicates.
+                        reliantVersions.push_back(reliantVersion);
+                    }
+                }
+            }
+
+            // 7. a. Save versions for nodes which need them.
+            //    b. Fill in stmtReliance.
+            // TODO: maybe randomize iteration order for less contention? Needs profiling.
+            Map<Version, NodeBS> &osStmtReliance = this->stmtReliance.at(o);
+            for (size_t i = 0; i < nodesWhichNeedVersions.size(); ++i)
+            {
+                const NodeID n = nodesWhichNeedVersions[i];
+                std::mutex &mutex = versionMutexes[i];
+
+                const int scc = partOf[n];
+                if (scc == -1) continue;
+
+                std::lock_guard<std::mutex> guard(mutex);
+
+                const Version c = sccToVersion[scc];
+                if (c != invalidVersion)
+                {
+                    this->setConsume(n, o, c);
+                    // Version-change reprocessing is load-driven: keep only loads in stmt reliance.
+                    if (this->isLoad(n)) osStmtReliance[c].set(n);
+                }
+
+                if (this->isStore(n))
+                {
+                    const Map<NodeID, Version>::const_iterator yIt = storesYieldedVersion.find(n);
+                    if (yIt != storesYieldedVersion.end()) this->setYield(n, o, yIt->second);
+                }
+            }
+        }
+    };
+
+    std::vector<std::thread> workers;
+    for (unsigned i = 0; i < Options::VersioningThreads(); ++i) workers.push_back(std::thread(meldVersionWorker, i));
+    for (std::thread &worker : workers) worker.join();
+
+    // Fill equivalent objects with references to canonical reliance maps.
+    versionRelianceRef.clear();
+    stmtRelianceRef.clear();
+    for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
+    {
+        const NodeID o = kv.first;
+        const NodeID canon = kv.second;
+        versionRelianceRef[o] = &versionReliance[canon];
+        stmtRelianceRef[o] = &stmtReliance[canon];
+    }
+
+    delete[] versionMutexes;
+
+    double end = stat->getClk(true);
+    meldLabelingTime = (end - start) / TIMEINTERVAL;
+}
+
+void VersionedFlowSensitive::newmeldLabel(void)
+{
+    double start = stat->getClk(true);
+
+    assert(Options::VersioningThreads() > 0 && "VFS::meldLabel: number of versioning threads must be > 0!");
+
+    // Nodes which have at least one object on them given a prelabel + the Andersen's points-to
+    // set of interest so we don't keep calling getPts. For Store nodes, we'll fill that in, for
+    // MR nodes, we won't as its getPointsTo is cheap.
+    // TODO: preferably we cache both for ease and to avoid the dyn_cast/isa, but Andersen's points-to
+    // sets are PointsTo and MR's sets are NodeBS, which are incompatible types. Maybe when we can
+    // use std::option.
+    std::vector<std::pair<const SVFGNode *, const PointsTo *>> prelabeledNodes;
+    // Fast query for the above.
+    std::vector<bool> isPrelabeled(svfg->getTotalNodeNum(), false);
+    while (!vWorklist.empty())
+    {
+        const NodeID n = vWorklist.pop();
+        isPrelabeled[n] = true;
+
+        const SVFGNode *sn = svfg->getSVFGNode(n);
+        const PointsTo *nPts = nullptr;
+        if (const StoreSVFGNode *store = SVFUtil::dyn_cast<StoreSVFGNode>(sn))
+        {
+            const NodeID p = store->getPAGDstNodeID();
+            nPts = &(this->ander->getPts(p));
+        }
+
+        prelabeledNodes.push_back(std::make_pair(sn, nPts));
+    }
+
+    // Delta, delta source, store, and load nodes, which require versions during
+    // solving, unlike other nodes with which we can make do with the reliance map.
+    std::vector<NodeID> nodesWhichNeedVersions;
+    for (SVFG::const_iterator it = svfg->begin(); it != svfg->end(); ++it)
+    {
+        const NodeID n = it->first;
+        if (delta(n) || deltaSource(n) || isStore(n) || isLoad(n)) nodesWhichNeedVersions.push_back(n);
+    }
+
+    std::mutex *versionMutexes = new std::mutex[nodesWhichNeedVersions.size()];
+
+    // Map of footprints to the canonical object "owning" the footprint.
+    Map<std::vector<const IndirectSVFGEdge *>, NodeID> footprintOwner;
+
+    std::queue<NodeID> objectQueue;
+    for (const NodeID o : prelabeledObjects)
+    {
+        // "Touch" maps with o so we don't need to lock on them.
+        versionReliance[o];
+        stmtReliance[o];
+        objectQueue.push(o);
+    }
+
+    std::mutex objectQueueMutex;
+    std::mutex footprintOwnerMutex;
+
+    auto meldVersionWorker = [this, &footprintOwner, &objectQueue,
+                                    &objectQueueMutex, &footprintOwnerMutex, &versionMutexes,
+                                    &prelabeledNodes, &isPrelabeled, &nodesWhichNeedVersions]
+         (const unsigned thread)
+    {
+        while (true)
+        {
+            NodeID o;
+            {
+                std::lock_guard<std::mutex> guard(objectQueueMutex);
+                // No more objects? Done.
+                if (objectQueue.empty()) return;
+                o = objectQueue.front();
+                objectQueue.pop();
+            }
+
+            // 1. Compute the SCCs for the nodes on the graph overlay of o.
+            // For starting nodes, we only need those which did prelabeling for o specifically.
+            // TODO: maybe we should move this to prelabel with a map (o -> starting nodes).
+            std::vector<const SVFGNode *> osStartingNodes;
+            for (std::pair<const SVFGNode *, const PointsTo *> snPts : prelabeledNodes)
+            {
+                const SVFGNode *sn = snPts.first;
+                const PointsTo *pts = snPts.second;
+                if (pts != nullptr)
+                {
+                    if (pts->test(o)) osStartingNodes.push_back(sn);
+                }
+                else if (const MRSVFGNode *mr = SVFUtil::dyn_cast<MRSVFGNode>(sn))
+                {
+                    if (mr->getPointsTo().test(o)) osStartingNodes.push_back(sn);
+                }
+                else
+                {
+                    assert(false && "VFS::meldLabel: unexpected prelabeled node!");
+                }
+            }
+
+            std::vector<int> partOf;
+            std::vector<const IndirectSVFGEdge *> footprint;
+            unsigned numSCCs = SCC::detectSCCs(this, this->svfg, o, osStartingNodes, partOf, footprint);
+            this->recordStmt(footprint.size());
+
+            // 2. Skip any further processing of a footprint we have seen before.
+            {
+                std::lock_guard<std::mutex> guard(footprintOwnerMutex);
+                const Map<std::vector<const IndirectSVFGEdge *>, NodeID>::const_iterator canonOwner
+                    = footprintOwner.find(footprint);
+                if (canonOwner == footprintOwner.end())
+                {
+                    this->equivalentObject[o] = o;
+                    footprintOwner[footprint] = o;
+                }
+                else
+                {
+                    this->equivalentObject[o] = canonOwner->second;
+                    // Reliance maps are kept on canonical objects only and queried through
+                    // equivalentObject mapping at use sites.
+                    continue;
+                }
+            }
+
+            // 3. a. Initialise the MeldVersion of prelabeled nodes (SCCs).
+            //    b. Initialise a todo list of all the nodes we need to version,
+            //       sorted according to topological order.
+            // We will use a map of sccs to meld versions for what is consumed.
+            std::vector<MeldVersion> sccToMeldVersion(numSCCs);
+            // At stores, what is consumed is different to what is yielded, so we
+            // maintain that separately.
+            Map<NodeID, MeldVersion> storesYieldedMeldVersion;
+            // SVFG nodes of interest -- those part of an SCC from the starting nodes.
+            std::vector<NodeID> todoList;
+            unsigned bit = 0;
+            // To calculate reachable nodes, we can see what nodes n exist where
+            // partOf[n] != -1. Since the SVFG can be large this can be expensive.
+            // Instead, we can gather this from the edges in the footprint and
+            // the starting nodes (incase such nodes have no edges).
+            // TODO: should be able to do this better: too many redundant inserts.
+            Set<NodeID> reachableNodes;
+            for (const SVFGNode *sn : osStartingNodes) reachableNodes.insert(sn->getId());
+            for (const SVFGEdge *se : footprint)
+            {
+                reachableNodes.insert(se->getSrcNode()->getId());
+                reachableNodes.insert(se->getDstNode()->getId());
+            }
+
+            for (const NodeID n : reachableNodes)
+            {
+                if (isPrelabeled[n])
+                {
+                    if (this->isStore(n)) storesYieldedMeldVersion[n].set(bit);
+                    else sccToMeldVersion[partOf[n]].set(bit);
+                    ++bit;
+                }
+
+                todoList.push_back(n);
+            }
+
+            // Sort topologically so each nodes is only visited once.
+            auto cmp = [&partOf](const NodeID a, const NodeID b)
+            {
+                return partOf[a] > partOf[b];
+            };
+            std::sort(todoList.begin(), todoList.end(), cmp);
+
+            // 4. a. Do meld versioning.
+            //    b. Determine SCC reliances.
+            //    c. Build a footprint for o (all edges which it is found on).
+            //    d. Determine which SCCs belong to stores.
+
+            // sccReliance[x] = { y_1, y_2, ... } if there exists an edge from a node
+            // in SCC x to SCC y_i.
+            std::vector<Set<int>> sccReliance(numSCCs);
+            // Maps SCC to the store it corresponds to or -1 if it doesn't. TODO: unsigned vs signed -- nasty.
+            std::vector<int> storeSCC(numSCCs, -1);
+            for (size_t i = 0; i < todoList.size(); ++i)
+            {
+                const NodeID n = todoList[i];
+                const SVFGNode *sn = this->svfg->getSVFGNode(n);
+                const bool nIsStore = this->isStore(n);
+
+                int nSCC = partOf[n];
+                if (nIsStore) storeSCC[nSCC] = n;
+
+                // Given n -> m, the yielded version of n will be melded into m.
+                // For stores, that is in storesYieldedMeldVersion, otherwise, consume == yield and
+                // we can just use sccToMeldVersion.
+                const MeldVersion &nMV = nIsStore ? storesYieldedMeldVersion[n] : sccToMeldVersion[nSCC];
+                for (const SVFGEdge *e : sn->getOutEdges())
+                {
+                    const IndirectSVFGEdge *ie = SVFUtil::dyn_cast<IndirectSVFGEdge>(e);
+                    if (!ie) continue;
+
+                    const NodeID m = ie->getDstNode()->getId();
+                    // Ignoreedges which don't involve o.
+                    if (!ie->getPointsTo().test(o)) continue;
+
+                    int mSCC = partOf[m];
+
+                    // There is an edge from the SCC n belongs to that m belongs to.
+                    sccReliance[nSCC].insert(mSCC);
+
+                    // Ignore edges to delta nodes (prelabeled consume).
+                    // No point propagating when n's SCC == m's SCC (same meld version there)
+                    // except when it is a store, because we are actually propagating n's yielded
+                    // into m's consumed. Store nodes are in their own SCCs, so it is a self
+                    // loop on a store node.
+                    if (!this->delta(m) && (nSCC != mSCC || nIsStore))
+                    {
+                        sccToMeldVersion[mSCC] |= nMV;
+                    }
+                }
+            }
+
+            // 5. Transform meld versions belonging to SCCs into versions.
+            Map<MeldVersion, Version> mvv;
+            std::vector<Version> sccToVersion(numSCCs, invalidVersion);
+            Version curVersion = 0;
+            for (u32_t scc = 0; scc < sccToMeldVersion.size(); ++scc)
+            {
+                const MeldVersion &mv = sccToMeldVersion[scc];
+                Map<MeldVersion, Version>::const_iterator foundVersion = mvv.find(mv);
+                Version v = foundVersion == mvv.end() ? mvv[mv] = ++curVersion : foundVersion->second;
+                sccToVersion[scc] = v;
+            }
+
+            sccToMeldVersion.clear();
+
+            // Same for storesYieldedMeldVersion.
+            Map<NodeID, Version> storesYieldedVersion;
+            Map<NodeID, Version> loadsConsumedVersion;
+            for (auto const& nmv : storesYieldedMeldVersion)
+            {
+                const NodeID n = nmv.first;
+                const MeldVersion &mv = nmv.second;
+
+                Map<MeldVersion, Version>::const_iterator foundVersion = mvv.find(mv);
+                Version v = foundVersion == mvv.end() ? mvv[mv] = ++curVersion : foundVersion->second;
+                storesYieldedVersion[n] = v;
+            }
+
+            storesYieldedMeldVersion.clear();
+
+            mvv.clear();
+            this->recordVersion(curVersion);
 
             // 6. From SCC reliance, determine version reliances.
             Map<Version, std::vector<Version>> &osVersionReliance = this->versionReliance.at(o);

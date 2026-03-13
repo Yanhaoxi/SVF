@@ -243,6 +243,12 @@ const Option<std::string> Options::VDGPassOrder(
     "SMC"
 );
 
+const Option<bool> Options::NewVersionGen(
+    "new-version-gen",
+    "Use graph-simplified version generation in VFS meld labeling (new path by default)",
+    true
+);
+
 // Base class of pointer analyses (PointerAnalysis.cpp)
 const Option<bool> Options::TypePrint(
     "print-type",

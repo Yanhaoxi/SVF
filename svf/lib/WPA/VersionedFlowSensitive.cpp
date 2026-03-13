@@ -58,6 +58,8 @@ void VersionedFlowSensitive::initialize()
     stat = new VersionedFlowSensitiveStat(this);
 
     vPtD = getVersionedPTDataTy();
+    stmtcount.clear();
+    versioncount.clear();
 
     buildIsStoreLoadMaps();
     buildDeltaMaps();
@@ -65,7 +67,8 @@ void VersionedFlowSensitive::initialize()
     stmtPtsCache.resize(svfg->getTotalNodeNum());
 
     prelabel();
-    meldLabel();
+    if(Options::NewVersionGen()){newmeldLabel();}
+    else{meldLabel();}
     expandEquivalentObjectVersions();
     // Build VDGs in object-major streaming mode and simplify each graph in-place.
     buildVersionDependencyGraphs();
@@ -77,8 +80,10 @@ void VersionedFlowSensitive::initialize()
         outName += "_simplified";
         vdgManager.writeToFile(outName);
     }
-    if (Options::VDGStat())
+    if (Options::VDGStat()){
         vdgManager.dumpStats();
+        dumpOriginalData();
+    }
 
     removeAllIndirectSVFGEdges();
 }
@@ -97,6 +102,31 @@ void VersionedFlowSensitive::finalize()
     }
     if (Options::VDGStat())
         vdgManager.dumpStats();
+}
+
+void VersionedFlowSensitive::recordStmt(u32_t countNum)
+{
+    if (!Options::VDGStat())
+        return;
+    ++stmtcount[countNum];
+}
+
+void VersionedFlowSensitive::recordVersion(u32_t countNum)
+{
+    if (!Options::VDGStat())
+        return;
+    ++versioncount[countNum];
+}
+
+void VersionedFlowSensitive::dumpOriginalData(void) const
+{
+    SVFUtil::outs() << "stmtcount (countnum:occurnum)\n";
+    for (const CountHistogram::value_type &kv : stmtcount)
+        SVFUtil::outs() << kv.first << ":" << kv.second << "\n";
+
+    SVFUtil::outs() << "versioncount (countnum:occurnum)\n";
+    for (const CountHistogram::value_type &kv : versioncount)
+        SVFUtil::outs() << kv.first << ":" << kv.second << "\n";
 }
 
 bool VersionedFlowSensitive::meld(MeldVersion &mv1, const MeldVersion &mv2)

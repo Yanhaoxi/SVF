@@ -740,6 +740,7 @@ bool FlowSensitive::updateCallGraph(const CallSiteToFunPtrMap& callsites)
 /*!
  *  Handle parameter passing in SVFG
  */
+// 注意间接调用的传播是后续建立的
 void FlowSensitive::connectCallerAndCallee(const CallEdgeMap& newEdges, SVFGEdgeSetTy& edges)
 {
     CallEdgeMap::const_iterator iter = newEdges.begin();

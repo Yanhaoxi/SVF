@@ -171,6 +171,9 @@ public:
     /// Dumps maps consume and yield.
     void dumpLocVersionMaps(void) const;
 
+    /// Dumps custom profiling counters (countnum:occurnum).
+    void dumpOriginalData(void) const;
+
     void solveAndwritePtsToFile(const std::string& filename) override;
 
     void writeVersionedAnalysisResultToFile(const std::string& filename);
@@ -187,6 +190,7 @@ private:
     void prelabel(void);
     /// Meld label the prelabeled SVFG.
     void meldLabel(void);
+    void newmeldLabel(void);
     /// Melds v2 into v1 (in place), returns whether a change occurred.
     static bool meld(MeldVersion &mv1, const MeldVersion &mv2);
 
@@ -198,6 +202,9 @@ private:
 
     /// Fills in deltaMap and deltaSourceMap for the SVFG.
     virtual void buildDeltaMaps(void);
+
+    void recordStmt(u32_t countNum);
+    void recordVersion(u32_t countNum);
 
     /// Returns true if l is a delta node, i.e., may get a new incoming indirect
     /// edge due to on-the-fly callgraph construction.
@@ -315,6 +322,10 @@ private:
     /// isLoadMap[l] means SVFG node l is a load node.
     std::vector<bool> isLoadMap;
 
+    typedef Map<u32_t, u64_t> CountHistogram;
+    CountHistogram stmtcount;
+    CountHistogram versioncount;
+
     /// Additional statistics.
     //@{
     u32_t numPrelabeledNodes;  ///< Number of prelabeled nodes.
@@ -326,6 +337,63 @@ private:
     double vdgBuildTime;     ///< Time to build VDG after meld labeling.
     double vdgSimplifyTime;  ///< Time to simplify VDG.
     //@}
+
+    class VersionDSU
+    {
+    public:
+        VersionDSU() = default;
+        explicit VersionDSU(u32_t n)
+        {
+            reset(n);
+        }
+
+        void reset(u32_t n)
+        {
+            parent.resize(n);
+            rank.assign(n, 0);
+            for (u32_t i = 0; i < n; ++i)
+                parent[i] = i;
+        }
+
+        u32_t addNode()
+        {
+            const u32_t id = parent.size();
+            parent.push_back(id);
+            rank.push_back(0);
+            return id;
+        }
+
+        u32_t find(u32_t x)
+        {
+            while (parent[x] != x)
+            {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            return x;
+        }
+
+        bool unite(u32_t a, u32_t b)
+        {
+            a = find(a);
+            b = find(b);
+            if (a == b) return false;
+
+            if (rank[a] < rank[b])
+            {
+                const u32_t tmp = a;
+                a = b;
+                b = tmp;
+            }
+            parent[b] = a;
+            if (rank[a] == rank[b]) ++rank[a];
+            return true;
+        }
+
+    private:
+        std::vector<u32_t> parent;
+        std::vector<u8_t> rank;
+    };
 
     static VersionedFlowSensitive *vfspta;
 
