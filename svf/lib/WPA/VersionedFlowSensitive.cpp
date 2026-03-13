@@ -14,6 +14,7 @@
 #include "MemoryModel/PointsTo.h"
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cstddef>
 #include <fstream>
 #include <iostream>
@@ -42,6 +43,17 @@ namespace
         (void)graph.sccMergeSolidEdges();
     }
 
+    void vdgSimplifyReverseReachMerge(VDG &graph)
+    {
+        graph.reverseReachMergeByAnchors();
+    }
+
+    void vdgSimplifyStableReachability(VDG &graph)
+    {
+        graph.reduceByStableSrcReachability();
+        graph.reduceByStableDstReachability();
+    }
+
     void vdgSimplifyPrune(VDG &graph)
     {
         graph.pruneUnreachableToLoadConsume();
@@ -56,6 +68,59 @@ namespace
     void vdgSimplifyTransRedundancy(VDG &graph)
     {
         graph.transitiveRedundancyElimination();
+    }
+
+    bool registerVDGSimplifyPassByKey(std::vector<VDGSimplifyPass> &passes, char key)
+    {
+        switch (key)
+        {
+        case 'S':
+            registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
+            return true;
+        case 'A':
+            registerVDGSimplifyPass(passes, vdgSimplifyReverseReachMerge);
+            return true;
+        case 'M':
+            registerVDGSimplifyPass(passes, vdgSimplifyStableReachability);
+            return true;
+        case 'P':
+            registerVDGSimplifyPass(passes, vdgSimplifyPrune);
+            return true;
+        case 'T':
+            registerVDGSimplifyPass(passes, vdgSimplifyTransRedundancy);
+            return true;
+        case 'C':
+            registerVDGSimplifyPass(passes, vdgSimplifyChainContraction);
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    void buildVDGSimplifyPassPipeline(std::vector<VDGSimplifyPass> &passes, const std::string &order)
+    {
+        passes.clear();
+
+        for (char raw : order)
+        {
+            const unsigned char c = static_cast<unsigned char>(raw);
+            if (std::isspace(c) || raw == ',' || raw == ';' || raw == ':' || raw == '-' || raw == '_')
+                continue;
+
+            const char key = static_cast<char>(std::toupper(c));
+            if (!registerVDGSimplifyPassByKey(passes, key))
+                SVFUtil::errs() << "VFS: unknown VDG pass key '" << raw
+                                << "' in -vdg-pass-order=" << order << "\n";
+        }
+
+        if (!passes.empty())
+            return;
+
+        const std::string fallback = "SMTC";
+        for (char key : fallback)
+            (void)registerVDGSimplifyPassByKey(passes, key);
+        SVFUtil::errs() << "VFS: empty VDG pass pipeline, fallback to -vdg-pass-order="
+                        << fallback << "\n";
     }
 }
 
@@ -475,8 +540,8 @@ void VersionedFlowSensitive::meldLabel(void)
                 if (c != invalidVersion)
                 {
                     this->setConsume(n, o, c);
-                    // include store stmt for version between store is lack of connected edges
-                    if (this->isStore(n) || this->isLoad(n)) osStmtReliance[c].set(n);
+                    // Version-change reprocessing is load-driven: keep only loads in stmt reliance.
+                    if (this->isLoad(n)) osStmtReliance[c].set(n);
                 }
 
                 if (this->isStore(n))
@@ -704,13 +769,11 @@ void VersionedFlowSensitive::propagateAllVersions()
             const NodeBS& stmts = graph->getStmtReliance(v);
             for (NodeID s : stmts)
             {
-                // stmtReliance contains both loads and stores (set in meldLabel).
-                // For loads: clear the specific object bit so processLoad's delta includes it.
-                if (isLoad(s))
-                {
-                    assert(s < stmtPtsCache.size() && "stmtPtsCache must be pre-sized to SVFG node count");
-                    stmtPtsCache[s].reset(obj);
-                }
+                // stmtReliance is load-only (set in meldLabel).
+                // Clear the specific object bit so processLoad's delta includes it.
+                assert((isLoad(s)) && "VFS::stmtRelianceCallback: unexpected stmt kind");
+                assert(s < stmtPtsCache.size() && "stmtPtsCache must be pre-sized to SVFG node count");
+                stmtPtsCache[s].reset(obj);
                 pushIntoWorklist(s);
             }
         };
@@ -1178,10 +1241,7 @@ void VersionedFlowSensitive::buildVersionDependencyGraphs(void)
     };
 
     std::vector<VDGSimplifyPass> passes;
-    registerVDGSimplifyPass(passes, vdgSimplifySCCMerge);
-    registerVDGSimplifyPass(passes, vdgSimplifyPrune);
-    registerVDGSimplifyPass(passes, vdgSimplifyTransRedundancy);
-    registerVDGSimplifyPass(passes, vdgSimplifyChainContraction);
+    buildVDGSimplifyPassPipeline(passes, Options::VDGPassOrder());
 
     auto addVirtualIndCallEdgeForObj =
         [this](NodeID srcId, NodeID dstId, NodeID o, VDG &graph)

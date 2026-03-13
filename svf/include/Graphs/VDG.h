@@ -266,6 +266,9 @@ public:
 
     void pruneUnreachableToLoadConsume();
     void pruneUnreachableFromStoreYield();
+    void reduceByStableSrcReachability();
+    void reduceByStableDstReachability();
+    void reverseReachMergeByAnchors();
     void chainContraction();
     void transitiveRedundancyElimination();
 

@@ -403,6 +403,145 @@ NodeVector VDG::sccMergeSolidEdges(const NodeVector& candidates)
     return topoOrder;
 }
 
+void VDG::reverseReachMergeByAnchors()
+{
+    // Anchors are load-consume nodes and virtual-edge sources.
+    NodeVector anchors;
+    forEachSuperNode([&](Version v, VDGNode* node)
+    {
+        if (node->isLoadConsume() || !node->getVirtualOut().empty())
+            anchors.push_back(v);
+    });
+
+    if (anchors.size() <= 1)
+        return;
+
+    std::sort(anchors.begin(), anchors.end());
+    anchors.erase(std::unique(anchors.begin(), anchors.end()), anchors.end());
+    if (anchors.size() <= 1)
+        return;
+
+    // Restrict SCC merging/traversal to anchor-relevant region.
+    NodeVector topoOrder = sccMergeSolidEdges(anchors);
+    if (topoOrder.size() <= 1)
+        return;
+
+    NodeBS anchorReps;
+    for (Version v : anchors)
+    {
+        if (!hasVersion(v))
+            continue;
+        const Version rep = getRepVersion(v);
+        if (!hasVersion(rep) || !isSuperVersion(rep))
+            continue;
+        anchorReps.set(rep);
+    }
+
+    if (anchorReps.count() <= 1)
+        return;
+
+    // Compute anchor-reachability by reverse topological DP:
+    // reach[v] = anchors reachable from v via (solid|virtual) outgoing edges.
+    Map<Version, NodeBS> reach;
+    for (auto it = topoOrder.rbegin(); it != topoOrder.rend(); ++it)
+    {
+        const Version v = *it;
+        if (!hasVersion(v) || !isSuperVersion(v))
+            continue;
+
+        NodeBS &rv = reach[v];
+        if (anchorReps.test(v))
+            rv.set(v);
+
+        VDGNode* node = getNode(v);
+        for (Version dst : node->getSolidOut())
+        {
+            if (!hasVersion(dst) || !isSuperVersion(dst))
+                continue;
+            const auto dIt = reach.find(dst);
+            if (dIt != reach.end())
+                rv |= dIt->second;
+        }
+        for (Version dst : node->getVirtualOut())
+        {
+            if (!hasVersion(dst) || !isSuperVersion(dst))
+                continue;
+            const auto dIt = reach.find(dst);
+            if (dIt != reach.end())
+                rv |= dIt->second;
+        }
+    }
+
+    auto hashNodeBS = [](const NodeBS &bs) -> size_t
+    {
+        size_t h = 1469598103934665603ull;
+        for (unsigned bit : bs)
+        {
+            h ^= static_cast<size_t>(bit) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            h *= 1099511628211ull;
+        }
+        return h;
+    };
+
+    Map<size_t, NodeVector> hashLeaders;
+    Map<Version, NodeVector> mergeGroups;
+
+    for (Version v : topoOrder)
+    {
+        if (!hasVersion(v) || !isSuperVersion(v))
+            continue;
+
+        const auto vIt = reach.find(v);
+        if (vIt == reach.end() || vIt->second.empty())
+            continue;
+
+        const NodeBS &vReach = vIt->second;
+        const size_t h = hashNodeBS(vReach);
+        NodeVector &leaders = hashLeaders[h];
+
+        Version leader = 0;
+        for (Version cand : leaders)
+        {
+            if (!hasVersion(cand) || !isSuperVersion(cand))
+                continue;
+
+            const auto cIt = reach.find(cand);
+            if (cIt == reach.end())
+                continue;
+            if (cIt->second == vReach)
+            {
+                leader = cand;
+                break;
+            }
+        }
+
+        if (leader == 0)
+            leaders.push_back(v);
+        else
+            mergeGroups[leader].push_back(v);
+    }
+
+    for (Map<Version, NodeVector>::value_type &kv : mergeGroups)
+    {
+        const Version leader = kv.first;
+        if (!hasVersion(leader) || !isSuperVersion(leader))
+            continue;
+
+        NodeVector toMerge;
+        for (Version v : kv.second)
+        {
+            if (!hasVersion(v) || !isSuperVersion(v))
+                continue;
+            if (getRepVersion(v) == getRepVersion(leader))
+                continue;
+            toMerge.push_back(v);
+        }
+
+        if (!toMerge.empty())
+            mergeVersionsIntoRep(toMerge, leader);
+    }
+}
+
 void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback onChanged)
 {
     assert(hasPendingUpdates() && "propagateInTopoOrder called with no pending updates");
@@ -586,6 +725,213 @@ void VDG::pruneUnreachableFromStoreYield()
 
     for (Version repV : repsToRemove)
         removeNodeAndEdges(repV);
+}
+
+namespace
+{
+void reduceByStableReachabilityInternal(VDG& graph,
+                                        bool forward,
+                                        bool seedLoadConsume,
+                                        const std::function<void(Version)>& pruneVersion)
+{
+    const u32_t cap = static_cast<u32_t>(graph.capacity());
+    std::vector<NodeBS> must(cap);
+    std::vector<NodeBS> may(cap);
+    NodeBS inWorklist;
+    NodeVector worklist;
+
+    graph.forEachSuperNode([&](Version v, VDGNode* node)
+    {
+        const bool isSeed = seedLoadConsume ? node->isLoadConsume() : node->isStoreYield();
+        if (!isSeed)
+            return;
+
+        must[v].set(v);
+        may[v].set(v);
+        inWorklist.set(v);
+        worklist.push_back(v);
+    });
+
+    auto propagateToNeighbor = [&](Version src, Version neighbor, bool isSolid)
+    {
+        if (!graph.hasVersion(neighbor) || !graph.isSuperVersion(neighbor))
+            return;
+
+        bool changed = false;
+        if (isSolid)
+        {
+            NodeBS& neighborMust = must[neighbor];
+            const unsigned oldMust = neighborMust.count();
+            neighborMust |= must[src];
+            if (neighborMust.count() != oldMust)
+                changed = true;
+        }
+
+        NodeBS& neighborMay = may[neighbor];
+        const unsigned oldMay = neighborMay.count();
+        neighborMay |= may[src];
+        if (neighborMay.count() != oldMay)
+            changed = true;
+
+        if (changed && !inWorklist.test(neighbor))
+        {
+            inWorklist.set(neighbor);
+            worklist.push_back(neighbor);
+        }
+    };
+
+    while (!worklist.empty())
+    {
+        const Version v = worklist.back();
+        worklist.pop_back();
+        inWorklist.reset(v);
+
+        if (!graph.hasVersion(v) || !graph.isSuperVersion(v))
+            continue;
+
+        VDGNode* node = graph.getNode(v);
+        if (forward)
+        {
+            for (Version dst : node->getSolidOut())
+                propagateToNeighbor(v, dst, true);
+            for (Version dst : node->getVirtualOut())
+                propagateToNeighbor(v, dst, false);
+        }
+        else
+        {
+            for (Version src : node->getSolidIn())
+                propagateToNeighbor(v, src, true);
+            for (Version src : node->getVirtualIn())
+                propagateToNeighbor(v, src, false);
+        }
+    }
+
+    NodeVector toPrune;
+    graph.forEachSuperNode([&](Version v, VDGNode*)
+    {
+        if (may[v].empty())
+        {
+            assert(must[v].empty() && "must should also be empty when may is empty");
+            toPrune.push_back(v);
+        }
+    });
+
+    for (Version v : toPrune)
+        pruneVersion(v);
+
+    auto hashNodeBS = [](const NodeBS& bs) -> size_t
+    {
+        size_t h = 1469598103934665603ull;
+        for (unsigned bit : bs)
+        {
+            h ^= static_cast<size_t>(bit) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            h *= 1099511628211ull;
+        }
+        h ^= static_cast<size_t>(bs.count()) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+        return h;
+    };
+
+    Map<size_t, NodeVector> buckets;
+    graph.forEachSuperNode([&](Version v, VDGNode*)
+    {
+        if (must[v] != may[v])
+            return;
+        buckets[hashNodeBS(must[v])].push_back(v);
+    });
+
+    struct StableGroup
+    {
+        NodeBS stable;
+        NodeVector nodes;
+    };
+
+    for (Map<size_t, NodeVector>::value_type& bucket : buckets)
+    {
+        std::vector<StableGroup> groups;
+        for (Version v : bucket.second)
+        {
+            if (!graph.hasVersion(v) || !graph.isSuperVersion(v))
+                continue;
+
+            const NodeBS& stable = must[v];
+            bool placed = false;
+            for (StableGroup& group : groups)
+            {
+                if (group.stable != stable)
+                    continue;
+                group.nodes.push_back(v);
+                placed = true;
+                break;
+            }
+
+            if (!placed)
+            {
+                StableGroup group;
+                group.stable = stable;
+                group.nodes.push_back(v);
+                groups.push_back(std::move(group));
+            }
+        }
+
+        for (StableGroup& group : groups)
+        {
+            NodeVector toMerge;
+            toMerge.reserve(group.nodes.size());
+            for (Version v : group.nodes)
+            {
+                if (graph.hasVersion(v) && graph.isSuperVersion(v))
+                    toMerge.push_back(v);
+            }
+
+            if (toMerge.size() <= 1)
+                continue;
+
+            if (group.stable.count() == 1)
+            {
+                const Version stableV = static_cast<Version>(*group.stable.begin());
+                if (!graph.hasVersion(stableV))
+                    continue;
+
+                const Version stableRep = graph.getRepVersion(stableV);
+                if (!graph.hasVersion(stableRep) || !graph.isSuperVersion(stableRep))
+                    continue;
+
+                graph.mergeVersionsIntoRep(toMerge, stableRep);
+                continue;
+            }
+
+            graph.mergeVersionsIntoRep(toMerge, toMerge.front());
+        }
+    }
+}
+} // namespace
+
+// constraint system (dual of Dst):
+// Must(x)={s| y --solid_edge--> x, s in Must(y)} U {x| x is store-yield}
+// May(x)={s| y --edge--> x, s in May(y)} U {x| x is store-yield}
+// merge x into y: Must(y)=May(y)=May(x)=Must(x)
+// merge x into src: Must(x)=May(x)={src}
+// prune x: Must(x)=May(x)={}
+void VDG::reduceByStableSrcReachability()
+{
+    reduceByStableReachabilityInternal(*this,
+                                       /*forward=*/true,
+                                       /*seedLoadConsume=*/false,
+                                       [this](Version v)
+                                       {
+                                           removeNodeAndEdges(v);
+                                       });
+}
+
+void VDG::reduceByStableDstReachability()
+{
+    reduceByStableReachabilityInternal(*this,
+                                       /*forward=*/false,
+                                       /*seedLoadConsume=*/true,
+                                       [this](Version v)
+                                       {
+                                           removeNodeAndEdges(v);
+                                       });
 }
 
 void VDG::chainContraction()
