@@ -79,6 +79,8 @@ public:
 
     inline size_t outDegree() const { return solidOut_.size() + virtualOut_.size(); }
     inline size_t inDegree() const { return solidIn_.size() + virtualIn_.size(); }
+    inline size_t outSolidDegree() const { return solidOut_.size(); }
+    inline size_t inSolidDegree() const { return solidIn_.size(); }
     inline bool hasOutEdge() const { return outDegree() != 0; }
     inline bool hasInEdge() const { return inDegree() != 0; }
 

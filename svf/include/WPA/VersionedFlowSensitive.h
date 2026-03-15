@@ -17,10 +17,12 @@
 #include "Graphs/SVFGOPT.h"
 #include "Graphs/VDG.h"
 #include "MSSA/SVFGBuilder.h"
+#include "Util/CommandLine.h"
 #include "WPA/FlowSensitive.h"
 #include "WPA/WPAFSSolver.h"
 #include "MemoryModel/PointsTo.h"
 #include <memory>
+#include <mutex>
 
 namespace SVF
 {
@@ -36,6 +38,7 @@ class VersionedFlowSensitive : public FlowSensitive
 
 private:
     typedef CoreBitVector MeldVersion;
+    typedef unsigned EquiVersion;
 
 public:
     /// Per-object location-version map: l -> v.
@@ -205,6 +208,9 @@ private:
 
     void recordStmt(u32_t countNum);
     void recordVersion(u32_t countNum);
+    void recordStmtForObj(NodeID o, u32_t countNum);
+    void recordVersionForObj(NodeID o, u32_t countNum);
+    void recordRepeat(NodeID o, NodeID canon);
 
     /// Returns true if l is a delta node, i.e., may get a new incoming indirect
     /// edge due to on-the-fly callgraph construction.
@@ -303,6 +309,8 @@ private:
     }
 
     Set<NodeID> prelabeledObjects;
+    /// Object -> prelabel starting SVFG node ids used by meldLabel step1.
+    Map<NodeID, NodeVector> objStartingNodes;
 
     /// Points-to DS for working with versions.
     BVDataPTAImpl::VersionedPTDataTy *vPtD;
@@ -325,6 +333,10 @@ private:
     typedef Map<u32_t, u64_t> CountHistogram;
     CountHistogram stmtcount;
     CountHistogram versioncount;
+    typedef Map<NodeID, u32_t> ObjCountMap;
+    ObjCountMap objStmtCount;
+    ObjCountMap objVersionCount;
+    mutable std::mutex statRecordMutex;
 
     /// Additional statistics.
     //@{
@@ -342,28 +354,28 @@ private:
     {
     public:
         VersionDSU() = default;
-        explicit VersionDSU(u32_t n)
+        explicit VersionDSU(EquiVersion n)
         {
             reset(n);
         }
 
-        void reset(u32_t n)
+        void reset(unsigned n)
         {
             parent.resize(n);
             rank.assign(n, 0);
-            for (u32_t i = 0; i < n; ++i)
+            for (unsigned i = 0; i < n; ++i)
                 parent[i] = i;
         }
 
-        u32_t addNode()
+        EquiVersion addNode()
         {
-            const u32_t id = parent.size();
+            const EquiVersion id = parent.size();
             parent.push_back(id);
             rank.push_back(0);
             return id;
         }
 
-        u32_t find(u32_t x)
+        EquiVersion find(EquiVersion x)
         {
             while (parent[x] != x)
             {
@@ -373,7 +385,7 @@ private:
             return x;
         }
 
-        bool unite(u32_t a, u32_t b)
+        bool unite(EquiVersion a, EquiVersion b)
         {
             a = find(a);
             b = find(b);
@@ -381,7 +393,7 @@ private:
 
             if (rank[a] < rank[b])
             {
-                const u32_t tmp = a;
+                const EquiVersion tmp = a;
                 a = b;
                 b = tmp;
             }
@@ -391,7 +403,7 @@ private:
         }
 
     private:
-        std::vector<u32_t> parent;
+        std::vector<EquiVersion> parent;
         std::vector<u8_t> rank;
     };
 
@@ -408,6 +420,13 @@ private:
         } NodeData;
 
     public:
+        struct DetectProfile
+        {
+            double initTicks = 0.0;
+            double visitTicks = 0.0;
+            double sortTicks = 0.0;
+        };
+
         /// Determines the strongly connected components of svfg following only
         /// edges labelled with object. partOf[n] = scc means nodes n is part of
         /// SCC scc. startingNodes contains the nodes to begin the search from.
@@ -421,9 +440,10 @@ private:
         /// Skipped edges still form part of the footprint.
         static unsigned detectSCCs(VersionedFlowSensitive *vfs,
                                    const SVFG *svfg, const NodeID object,
-                                   const std::vector<const SVFGNode *> &startingNodes,
+                                   const std::vector<NodeID> &startingNodes,
                                    std::vector<int> &partOf,
-                                   std::vector<const IndirectSVFGEdge *> &footprint);
+                                   std::vector<const IndirectSVFGEdge *> &footprint,
+                                   DetectProfile *profile = nullptr);
 
     private:
         /// Called by detectSCCs then called recursively.
@@ -432,6 +452,8 @@ private:
                           std::vector<int> &partOf,
                           std::vector<const IndirectSVFGEdge *> &footprint,
                           std::vector<NodeData> &nodeData,
+                          std::vector<NodeID> &touchedPartOf,
+                          std::vector<NodeID> &touchedNodeData,
                           std::stack<const SVFGNode *> &stack,
                           int &index,
                           int &currentSCC,

@@ -60,6 +60,8 @@ void VersionedFlowSensitive::initialize()
     vPtD = getVersionedPTDataTy();
     stmtcount.clear();
     versioncount.clear();
+    objStmtCount.clear();
+    objVersionCount.clear();
 
     buildIsStoreLoadMaps();
     buildDeltaMaps();
@@ -108,6 +110,7 @@ void VersionedFlowSensitive::recordStmt(u32_t countNum)
 {
     if (!Options::VDGStat())
         return;
+    std::lock_guard<std::mutex> guard(statRecordMutex);
     ++stmtcount[countNum];
 }
 
@@ -115,18 +118,94 @@ void VersionedFlowSensitive::recordVersion(u32_t countNum)
 {
     if (!Options::VDGStat())
         return;
+    std::lock_guard<std::mutex> guard(statRecordMutex);
     ++versioncount[countNum];
+}
+
+void VersionedFlowSensitive::recordStmtForObj(NodeID o, u32_t countNum)
+{
+    if (!Options::VDGStat())
+        return;
+
+    std::lock_guard<std::mutex> guard(statRecordMutex);
+    ++stmtcount[countNum];
+    objStmtCount[o] = countNum;
+}
+
+void VersionedFlowSensitive::recordVersionForObj(NodeID o, u32_t countNum)
+{
+    if (!Options::VDGStat())
+        return;
+
+    std::lock_guard<std::mutex> guard(statRecordMutex);
+    ++versioncount[countNum];
+    objVersionCount[o] = countNum;
+}
+
+void VersionedFlowSensitive::recordRepeat(NodeID o, NodeID canon)
+{
+    if (!Options::VDGStat())
+        return;
+
+    // Duplicates reuse canonical counts; output resolves by equivalentObject.
+    std::lock_guard<std::mutex> guard(statRecordMutex);
+    const ObjCountMap::const_iterator stmtIt = objStmtCount.find(canon);
+    if (stmtIt != objStmtCount.end())
+        objStmtCount[o] = stmtIt->second;
+    const ObjCountMap::const_iterator verIt = objVersionCount.find(canon);
+    if (verIt != objVersionCount.end())
+        objVersionCount[o] = verIt->second;
 }
 
 void VersionedFlowSensitive::dumpOriginalData(void) const
 {
-    SVFUtil::outs() << "stmtcount (countnum:occurnum)\n";
-    for (const CountHistogram::value_type &kv : stmtcount)
-        SVFUtil::outs() << kv.first << ":" << kv.second << "\n";
+    u64_t stmtTotal = 0;
+    u64_t versionTotal = 0;
+    u32_t stmtMax = 0;
+    u32_t versionMax = 0;
+    NodeID stmtMaxObj = 0;
+    NodeID versionMaxObj = 0;
+    u64_t objCount = 0;
 
-    SVFUtil::outs() << "versioncount (countnum:occurnum)\n";
-    for (const CountHistogram::value_type &kv : versioncount)
-        SVFUtil::outs() << kv.first << ":" << kv.second << "\n";
+    SVFUtil::outs() << "objstmtcount (obj:stmtnum)\n";
+    for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
+    {
+        const NodeID o = kv.first;
+        const NodeID canon = kv.second;
+        const ObjCountMap::const_iterator it = objStmtCount.find(canon);
+        const u32_t value = it == objStmtCount.end() ? 0 : it->second;
+        stmtTotal += value;
+        if (value > stmtMax)
+        {
+            stmtMax = value;
+            stmtMaxObj = o;
+        }
+        ++objCount;
+    }
+
+    SVFUtil::outs() << "objversioncount (obj:versionnum)\n";
+    for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
+    {
+        const NodeID o = kv.first;
+        const NodeID canon = kv.second;
+        const ObjCountMap::const_iterator it = objVersionCount.find(canon);
+        const u32_t value = it == objVersionCount.end() ? 0 : it->second;
+        versionTotal += value;
+        if (value > versionMax)
+        {
+            versionMax = value;
+            versionMaxObj = o;
+        }
+    }
+
+    const double stmtAvg = objCount == 0 ? 0.0 : static_cast<double>(stmtTotal) / static_cast<double>(objCount);
+    const double versionAvg = objCount == 0 ? 0.0 : static_cast<double>(versionTotal) / static_cast<double>(objCount);
+    SVFUtil::outs() << "objstmtcount summary total:" << stmtTotal
+                    << " max:" << stmtMax << "@" << stmtMaxObj
+                    << " avg:" << stmtAvg << "\n";
+    SVFUtil::outs() << "objversioncount summary total:" << versionTotal
+                    << " max:" << versionMax << "@" << versionMaxObj
+                    << " avg:" << versionAvg << "\n";
 }
 
 bool VersionedFlowSensitive::meld(MeldVersion &mv1, const MeldVersion &mv2)
@@ -700,31 +779,72 @@ NodeBS &VersionedFlowSensitive::getStmtReliance(const NodeID o, const Version v)
 
 unsigned VersionedFlowSensitive::SCC::detectSCCs(VersionedFlowSensitive *vfs,
         const SVFG *svfg, const NodeID object,
-        const std::vector<const SVFGNode *> &startingNodes,
+        const std::vector<NodeID> &startingNodes,
         std::vector<int> &partOf,
-        std::vector<const IndirectSVFGEdge *> &footprint)
+        std::vector<const IndirectSVFGEdge *> &footprint,
+        DetectProfile *profile)
 {
-    partOf.resize(svfg->getTotalNodeNum());
-    std::fill(partOf.begin(), partOf.end(), -1);
+    const bool track = profile != nullptr;
+    const double initStartTicks = track ? vfs->stat->getClk(true) : 0.0;
+
+    const size_t totalNodes = svfg->getTotalNodeNum();
+    static thread_local std::vector<NodeData> nodeData;
+    static thread_local std::vector<NodeID> touchedPartOf;
+    static thread_local std::vector<NodeID> touchedNodeData;
+
+    if (partOf.size() != totalNodes)
+    {
+        partOf.assign(totalNodes, -1);
+        touchedPartOf.clear();
+    }
+    else
+    {
+        for (const NodeID id : touchedPartOf)
+            partOf[id] = -1;
+        touchedPartOf.clear();
+    }
+
     footprint.clear();
 
-    std::vector<NodeData> nodeData(svfg->getTotalNodeNum(), { -1, -1, false});
+    if (nodeData.size() != totalNodes)
+    {
+        nodeData.assign(totalNodes, { -1, -1, false });
+        touchedNodeData.clear();
+    }
+    else
+    {
+        for (const NodeID id : touchedNodeData)
+            nodeData[id] = { -1, -1, false };
+        touchedNodeData.clear();
+    }
+
     std::stack<const SVFGNode *> stack;
+
+    if (track)
+        profile->initTicks += vfs->stat->getClk(true) - initStartTicks;
 
     int index = 0;
     int currentSCC = 0;
 
-    for (const SVFGNode *v : startingNodes)
+    const double visitStartTicks = track ? vfs->stat->getClk(true) : 0.0;
+    for (const NodeID startId : startingNodes)
     {
-        if (nodeData[v->getId()].index == -1)
+        if (nodeData[startId].index == -1)
         {
-            visit(vfs, object, partOf, footprint, nodeData, stack, index, currentSCC, v);
+            const SVFGNode *startNode = svfg->getSVFGNode(startId);
+            visit(vfs, object, partOf, footprint, nodeData, touchedPartOf, touchedNodeData, stack, index, currentSCC, startNode);
         }
     }
+    if (track)
+        profile->visitTicks += vfs->stat->getClk(true) - visitStartTicks;
 
     // Make sure footprints with the same edges pass ==/hash the same.
+    const double sortStartTicks = track ? vfs->stat->getClk(true) : 0.0;
     std::sort(footprint.begin(), footprint.end());
+    if (track)
+        profile->sortTicks += vfs->stat->getClk(true) - sortStartTicks;
 
+    vfs->recordStmtForObj(object, static_cast<u32_t>(touchedPartOf.size()));
     return currentSCC;
 }
 
@@ -733,6 +853,8 @@ void VersionedFlowSensitive::SCC::visit(VersionedFlowSensitive *vfs,
                                         std::vector<int> &partOf,
                                         std::vector<const IndirectSVFGEdge *> &footprint,
                                         std::vector<NodeData> &nodeData,
+                                        std::vector<NodeID> &touchedPartOf,
+                                        std::vector<NodeID> &touchedNodeData,
                                         std::stack<const SVFGNode *> &stack,
                                         int &index,
                                         int &currentSCC,
@@ -743,6 +865,7 @@ void VersionedFlowSensitive::SCC::visit(VersionedFlowSensitive *vfs,
     nodeData[vId].index = index;
     nodeData[vId].lowlink = index;
     ++index;
+    touchedNodeData.push_back(vId);
 
     stack.push(v);
     nodeData[vId].onStack = true;
@@ -769,7 +892,7 @@ void VersionedFlowSensitive::SCC::visit(VersionedFlowSensitive *vfs,
 
         if (nodeData[wId].index == -1)
         {
-            visit(vfs, object, partOf, footprint, nodeData, stack, index, currentSCC, w);
+            visit(vfs, object, partOf, footprint, nodeData, touchedPartOf, touchedNodeData, stack, index, currentSCC, w);
             nodeData[vId].lowlink = std::min(nodeData[vId].lowlink, nodeData[wId].lowlink);
         }
         else if (nodeData[wId].onStack)
@@ -788,6 +911,7 @@ void VersionedFlowSensitive::SCC::visit(VersionedFlowSensitive *vfs,
             const NodeID wId = w->getId();
             nodeData[wId].onStack = false;
             partOf[wId] = currentSCC;
+            touchedPartOf.push_back(wId);
         }
         while (w != v);
 

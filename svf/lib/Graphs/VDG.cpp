@@ -955,9 +955,9 @@ void VDG::chainContraction()
             return;
         VDGNode* node = getNode(v);
 
-        enqueue(v);
+        // enqueue(v);
         for (Version src : node->getSolidIn()) enqueue(src);
-        for (Version src : node->getVirtualIn()) enqueue(src);
+        // for (Version src : node->getVirtualIn()) enqueue(src);
     };
 
     auto enqueueOutNeighbors = [&](Version v)
@@ -966,9 +966,9 @@ void VDG::chainContraction()
             return;
         VDGNode* node = getNode(v);
 
-        enqueue(v);
+        // enqueue(v);
         for (Version dst : node->getSolidOut()) enqueue(dst);
-        for (Version dst : node->getVirtualOut()) enqueue(dst);
+        // for (Version dst : node->getVirtualOut()) enqueue(dst);
     };
 
     auto tryMergeForward = [&](Version x) -> bool
@@ -982,9 +982,17 @@ void VDG::chainContraction()
         if (!xNode->getSingleOutEdge(y, isVirtual) || isVirtual)
             return false;
 
+        // 由于(x,y)合并只改变他们前驱交集的属性（出边集合）和自己的属性
+        VDGNode* yNode = getNode(y);
+        if(xNode->inSolidDegree()>=yNode->inSolidDegree())
+            enqueueInNeighbors(y);
+        else
+            enqueueInNeighbors(x);
+
         NodeVector toMerge = {x};
         mergeVersionsIntoRep(toMerge, y);
-        enqueueInNeighbors(y);
+        // enqueueInNeighbors(y);
+        enqueue(y);
         return true;
     };
 
@@ -999,9 +1007,16 @@ void VDG::chainContraction()
         if (!yNode->getSingleInEdge(x, isVirtual) || isVirtual)
             return false;
 
+        VDGNode* xNode = getNode(x);
+        if(xNode->outSolidDegree()>=yNode->outSolidDegree())
+            enqueueOutNeighbors(y);
+        else
+            enqueueOutNeighbors(x);
+
         NodeVector toMerge = {y};
         mergeVersionsIntoRep(toMerge, x);
-        enqueueOutNeighbors(x);
+        // enqueueOutNeighbors(x);
+        enqueue(x);
         return true;
     };
 

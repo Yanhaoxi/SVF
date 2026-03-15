@@ -115,6 +115,8 @@ namespace
 void VersionedFlowSensitive::prelabel(void)
 {
     double start = stat->getClk(true);
+    objStartingNodes.clear();
+    prelabeledObjects.clear();
     for (SVFG::iterator it = svfg->begin(); it != svfg->end(); ++it)
     {
         NodeID l = it->first;
@@ -128,6 +130,7 @@ void VersionedFlowSensitive::prelabel(void)
             for (NodeID o : ander->getPts(p))
             {
                 prelabeledObjects.insert(o);
+                objStartingNodes[o].push_back(l);
             }
 
             vWorklist.push(l);
@@ -146,6 +149,7 @@ void VersionedFlowSensitive::prelabel(void)
                 for (const NodeID o : mr->getPointsTo())
                 {
                     prelabeledObjects.insert(o);
+                    objStartingNodes[o].push_back(l);
                 }
 
                 // Push into worklist because its consume == its yield.
@@ -153,6 +157,15 @@ void VersionedFlowSensitive::prelabel(void)
                 if (mr->getPointsTo().count() != 0) ++numPrelabeledNodes;
             }
         }
+    }
+
+    for (Map<NodeID, NodeVector>::value_type &ov : objStartingNodes)
+    {
+        NodeVector &starts = ov.second;
+        if (starts.empty())
+            continue;
+        std::sort(starts.begin(), starts.end());
+        starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
     }
 
     double end = stat->getClk(true);
@@ -163,6 +176,47 @@ void VersionedFlowSensitive::meldLabel(void)
 {
     double start = stat->getClk(true);
 
+    struct MeldLabelProfileTotals
+    {
+        u64_t processedObjects = 0;
+        u64_t dedupSkippedObjects = 0;
+        double setupTicks = 0.0;
+        double step1Ticks = 0.0;
+        double step1SeedTicks = 0.0;
+        double step1SCCInitTicks = 0.0;
+        double step1SCCVisitTicks = 0.0;
+        double step1SCCSortTicks = 0.0;
+        double step2Ticks = 0.0;
+        double step3Ticks = 0.0;
+        double step4Ticks = 0.0;
+        double step5Ticks = 0.0;
+        double step6Ticks = 0.0;
+        double step7Ticks = 0.0;
+        double finalizeTicks = 0.0;
+
+        void addFrom(const MeldLabelProfileTotals &other)
+        {
+            processedObjects += other.processedObjects;
+            dedupSkippedObjects += other.dedupSkippedObjects;
+            step1Ticks += other.step1Ticks;
+            step1SeedTicks += other.step1SeedTicks;
+            step1SCCInitTicks += other.step1SCCInitTicks;
+            step1SCCVisitTicks += other.step1SCCVisitTicks;
+            step1SCCSortTicks += other.step1SCCSortTicks;
+            step2Ticks += other.step2Ticks;
+            step3Ticks += other.step3Ticks;
+            step4Ticks += other.step4Ticks;
+            step5Ticks += other.step5Ticks;
+            step6Ticks += other.step6Ticks;
+            step7Ticks += other.step7Ticks;
+        }
+    };
+
+    const bool enableMeldProfile = Options::VDGStat();
+    MeldLabelProfileTotals profileTotals;
+    std::mutex profileMutex;
+    const double setupStartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+
     assert(Options::VersioningThreads() > 0 && "VFS::meldLabel: number of versioning threads must be > 0!");
 
     // Nodes which have at least one object on them given a prelabel + the Andersen's points-to
@@ -171,23 +225,11 @@ void VersionedFlowSensitive::meldLabel(void)
     // TODO: preferably we cache both for ease and to avoid the dyn_cast/isa, but Andersen's points-to
     // sets are PointsTo and MR's sets are NodeBS, which are incompatible types. Maybe when we can
     // use std::option.
-    std::vector<std::pair<const SVFGNode *, const PointsTo *>> prelabeledNodes;
-    // Fast query for the above.
     std::vector<bool> isPrelabeled(svfg->getTotalNodeNum(), false);
     while (!vWorklist.empty())
     {
         const NodeID n = vWorklist.pop();
         isPrelabeled[n] = true;
-
-        const SVFGNode *sn = svfg->getSVFGNode(n);
-        const PointsTo *nPts = nullptr;
-        if (const StoreSVFGNode *store = SVFUtil::dyn_cast<StoreSVFGNode>(sn))
-        {
-            const NodeID p = store->getPAGDstNodeID();
-            nPts = &(this->ander->getPts(p));
-        }
-
-        prelabeledNodes.push_back(std::make_pair(sn, nPts));
     }
 
     // Delta, delta source, store, and load nodes, which require versions during
@@ -216,50 +258,65 @@ void VersionedFlowSensitive::meldLabel(void)
     std::mutex objectQueueMutex;
     std::mutex footprintOwnerMutex;
 
+    if (enableMeldProfile)
+        profileTotals.setupTicks = stat->getClk(true) - setupStartTicks;
+
     auto meldVersionWorker = [this, &footprintOwner, &objectQueue,
                                     &objectQueueMutex, &footprintOwnerMutex, &versionMutexes,
-                                    &prelabeledNodes, &isPrelabeled, &nodesWhichNeedVersions]
+                                    &isPrelabeled, &nodesWhichNeedVersions,
+                                    &profileMutex, &profileTotals, enableMeldProfile]
          (const unsigned thread)
     {
+        (void)thread;
+        MeldLabelProfileTotals localProfile;
+        std::vector<int> partOf;
+        std::vector<const IndirectSVFGEdge *> footprint;
+
         while (true)
         {
             NodeID o;
             {
                 std::lock_guard<std::mutex> guard(objectQueueMutex);
                 // No more objects? Done.
-                if (objectQueue.empty()) return;
+                if (objectQueue.empty()) break;
                 o = objectQueue.front();
                 objectQueue.pop();
             }
 
+            if (enableMeldProfile)
+                ++localProfile.processedObjects;
+
             // 1. Compute the SCCs for the nodes on the graph overlay of o.
             // For starting nodes, we only need those which did prelabeling for o specifically.
-            // TODO: maybe we should move this to prelabel with a map (o -> starting nodes).
-            std::vector<const SVFGNode *> osStartingNodes;
-            for (std::pair<const SVFGNode *, const PointsTo *> snPts : prelabeledNodes)
+            const double step1StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            const double step1SeedStartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            const Map<NodeID, NodeVector>::const_iterator startsIt = objStartingNodes.find(o);
+            static const NodeVector emptyStartingNodes;
+            const NodeVector &osStartingNodes
+                = startsIt == objStartingNodes.end() ? emptyStartingNodes : startsIt->second;
+            if (enableMeldProfile)
+                localProfile.step1SeedTicks += stat->getClk(true) - step1SeedStartTicks;
+
+            SCC::DetectProfile sccDetectProfile;
+            unsigned numSCCs = SCC::detectSCCs(
+                this,
+                this->svfg,
+                o,
+                osStartingNodes,
+                partOf,
+                footprint,
+                enableMeldProfile ? &sccDetectProfile : nullptr);
+            if (enableMeldProfile)
             {
-                const SVFGNode *sn = snPts.first;
-                const PointsTo *pts = snPts.second;
-                if (pts != nullptr)
-                {
-                    if (pts->test(o)) osStartingNodes.push_back(sn);
-                }
-                else if (const MRSVFGNode *mr = SVFUtil::dyn_cast<MRSVFGNode>(sn))
-                {
-                    if (mr->getPointsTo().test(o)) osStartingNodes.push_back(sn);
-                }
-                else
-                {
-                    assert(false && "VFS::meldLabel: unexpected prelabeled node!");
-                }
+                localProfile.step1Ticks += stat->getClk(true) - step1StartTicks;
+                localProfile.step1SCCInitTicks += sccDetectProfile.initTicks;
+                localProfile.step1SCCVisitTicks += sccDetectProfile.visitTicks;
+                localProfile.step1SCCSortTicks += sccDetectProfile.sortTicks;
             }
 
-            std::vector<int> partOf;
-            std::vector<const IndirectSVFGEdge *> footprint;
-            unsigned numSCCs = SCC::detectSCCs(this, this->svfg, o, osStartingNodes, partOf, footprint);
-            this->recordStmt(footprint.size());
-
             // 2. Skip any further processing of a footprint we have seen before.
+            const double step2StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            bool isCanonicalFootprint = true;
             {
                 std::lock_guard<std::mutex> guard(footprintOwnerMutex);
                 const Map<std::vector<const IndirectSVFGEdge *>, NodeID>::const_iterator canonOwner
@@ -272,15 +329,27 @@ void VersionedFlowSensitive::meldLabel(void)
                 else
                 {
                     this->equivalentObject[o] = canonOwner->second;
-                    // Reliance maps are kept on canonical objects only and queried through
-                    // equivalentObject mapping at use sites.
-                    continue;
+                    this->recordRepeat(o, canonOwner->second);
+                    isCanonicalFootprint = false;
                 }
+            }
+
+            if (enableMeldProfile)
+                localProfile.step2Ticks += stat->getClk(true) - step2StartTicks;
+
+            if (!isCanonicalFootprint)
+            {
+                if (enableMeldProfile)
+                    ++localProfile.dedupSkippedObjects;
+                // Reliance maps are kept on canonical objects only and queried through
+                // equivalentObject mapping at use sites.
+                continue;
             }
 
             // 3. a. Initialise the MeldVersion of prelabeled nodes (SCCs).
             //    b. Initialise a todo list of all the nodes we need to version,
             //       sorted according to topological order.
+            const double step3StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
             // We will use a map of sccs to meld versions for what is consumed.
             std::vector<MeldVersion> sccToMeldVersion(numSCCs);
             // At stores, what is consumed is different to what is yielded, so we
@@ -295,7 +364,7 @@ void VersionedFlowSensitive::meldLabel(void)
             // the starting nodes (incase such nodes have no edges).
             // TODO: should be able to do this better: too many redundant inserts.
             Set<NodeID> reachableNodes;
-            for (const SVFGNode *sn : osStartingNodes) reachableNodes.insert(sn->getId());
+            for (const NodeID startNode : osStartingNodes) reachableNodes.insert(startNode);
             for (const SVFGEdge *se : footprint)
             {
                 reachableNodes.insert(se->getSrcNode()->getId());
@@ -320,11 +389,14 @@ void VersionedFlowSensitive::meldLabel(void)
                 return partOf[a] > partOf[b];
             };
             std::sort(todoList.begin(), todoList.end(), cmp);
+            if (enableMeldProfile)
+                localProfile.step3Ticks += stat->getClk(true) - step3StartTicks;
 
             // 4. a. Do meld versioning.
             //    b. Determine SCC reliances.
             //    c. Build a footprint for o (all edges which it is found on).
             //    d. Determine which SCCs belong to stores.
+            const double step4StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
 
             // sccReliance[x] = { y_1, y_2, ... } if there exists an edge from a node
             // in SCC x to SCC y_i.
@@ -369,8 +441,11 @@ void VersionedFlowSensitive::meldLabel(void)
                     }
                 }
             }
+            if (enableMeldProfile)
+                localProfile.step4Ticks += stat->getClk(true) - step4StartTicks;
 
             // 5. Transform meld versions belonging to SCCs into versions.
+            const double step5StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
             Map<MeldVersion, Version> mvv;
             std::vector<Version> sccToVersion(numSCCs, invalidVersion);
             Version curVersion = 0;
@@ -400,9 +475,12 @@ void VersionedFlowSensitive::meldLabel(void)
             storesYieldedMeldVersion.clear();
 
             mvv.clear();
-            this->recordVersion(curVersion);
+            this->recordVersionForObj(o, curVersion);
+            if (enableMeldProfile)
+                localProfile.step5Ticks += stat->getClk(true) - step5StartTicks;
 
             // 6. From SCC reliance, determine version reliances.
+            const double step6StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
             Map<Version, std::vector<Version>> &osVersionReliance = this->versionReliance.at(o);
             for (u32_t scc = 0; scc < numSCCs; ++scc)
             {
@@ -424,10 +502,13 @@ void VersionedFlowSensitive::meldLabel(void)
                     }
                 }
             }
+            if (enableMeldProfile)
+                localProfile.step6Ticks += stat->getClk(true) - step6StartTicks;
 
             // 7. a. Save versions for nodes which need them.
             //    b. Fill in stmtReliance.
             // TODO: maybe randomize iteration order for less contention? Needs profiling.
+            const double step7StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
             Map<Version, NodeBS> &osStmtReliance = this->stmtReliance.at(o);
             for (size_t i = 0; i < nodesWhichNeedVersions.size(); ++i)
             {
@@ -453,12 +534,22 @@ void VersionedFlowSensitive::meldLabel(void)
                     if (yIt != storesYieldedVersion.end()) this->setYield(n, o, yIt->second);
                 }
             }
+            if (enableMeldProfile)
+                localProfile.step7Ticks += stat->getClk(true) - step7StartTicks;
+        }
+
+        if (enableMeldProfile)
+        {
+            std::lock_guard<std::mutex> guard(profileMutex);
+            profileTotals.addFrom(localProfile);
         }
     };
 
     std::vector<std::thread> workers;
     for (unsigned i = 0; i < Options::VersioningThreads(); ++i) workers.push_back(std::thread(meldVersionWorker, i));
     for (std::thread &worker : workers) worker.join();
+
+    const double finalizeStartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
 
     // Fill equivalent objects with references to canonical reliance maps.
     versionRelianceRef.clear();
@@ -471,45 +562,119 @@ void VersionedFlowSensitive::meldLabel(void)
         stmtRelianceRef[o] = &stmtReliance[canon];
     }
 
+    if (enableMeldProfile)
+        profileTotals.finalizeTicks = stat->getClk(true) - finalizeStartTicks;
+
     delete[] versionMutexes;
 
     double end = stat->getClk(true);
     meldLabelingTime = (end - start) / TIMEINTERVAL;
+
+    if (enableMeldProfile)
+    {
+        const double setupSec = profileTotals.setupTicks / TIMEINTERVAL;
+        const double step1Sec = profileTotals.step1Ticks / TIMEINTERVAL;
+        const double step1SeedSec = profileTotals.step1SeedTicks / TIMEINTERVAL;
+        const double step1SCCInitSec = profileTotals.step1SCCInitTicks / TIMEINTERVAL;
+        const double step1SCCVisitSec = profileTotals.step1SCCVisitTicks / TIMEINTERVAL;
+        const double step1SCCSortSec = profileTotals.step1SCCSortTicks / TIMEINTERVAL;
+        const double step2Sec = profileTotals.step2Ticks / TIMEINTERVAL;
+        const double step3Sec = profileTotals.step3Ticks / TIMEINTERVAL;
+        const double step4Sec = profileTotals.step4Ticks / TIMEINTERVAL;
+        const double step5Sec = profileTotals.step5Ticks / TIMEINTERVAL;
+        const double step6Sec = profileTotals.step6Ticks / TIMEINTERVAL;
+        const double step7Sec = profileTotals.step7Ticks / TIMEINTERVAL;
+        const double finalizeSec = profileTotals.finalizeTicks / TIMEINTERVAL;
+
+        const double accumulatedSec =
+            setupSec + step1Sec + step2Sec + step3Sec + step4Sec + step5Sec + step6Sec + step7Sec + finalizeSec;
+        auto pct = [accumulatedSec](double sec) -> double
+        {
+            return accumulatedSec > 0.0 ? (100.0 * sec / accumulatedSec) : 0.0;
+        };
+        auto step1Pct = [step1Sec](double sec) -> double
+        {
+            return step1Sec > 0.0 ? (100.0 * sec / step1Sec) : 0.0;
+        };
+
+        SVFUtil::outs() << "VFS meldLabel profiling:\n";
+        SVFUtil::outs() << "  objects processed: " << profileTotals.processedObjects
+                        << ", dedup skipped: " << profileTotals.dedupSkippedObjects << "\n";
+        SVFUtil::outs() << "  wall total (sec): " << meldLabelingTime << "\n";
+        SVFUtil::outs() << "  accumulated step total (sec): " << accumulatedSec << "\n";
+        SVFUtil::outs() << "  setup: " << setupSec << " (" << pct(setupSec) << "%)\n";
+        SVFUtil::outs() << "  step1_scc: " << step1Sec << " (" << pct(step1Sec) << "%)\n";
+        SVFUtil::outs() << "    step1_seed_select: " << step1SeedSec
+                        << " (" << step1Pct(step1SeedSec) << "% of step1)\n";
+        SVFUtil::outs() << "    step1_scc_init: " << step1SCCInitSec
+                        << " (" << step1Pct(step1SCCInitSec) << "% of step1)\n";
+        SVFUtil::outs() << "    step1_scc_visit: " << step1SCCVisitSec
+                        << " (" << step1Pct(step1SCCVisitSec) << "% of step1)\n";
+        SVFUtil::outs() << "    step1_footprint_sort: " << step1SCCSortSec
+                        << " (" << step1Pct(step1SCCSortSec) << "% of step1)\n";
+        SVFUtil::outs() << "  step2_dedup: " << step2Sec << " (" << pct(step2Sec) << "%)\n";
+        SVFUtil::outs() << "  step3_init: " << step3Sec << " (" << pct(step3Sec) << "%)\n";
+        SVFUtil::outs() << "  step4_meld: " << step4Sec << " (" << pct(step4Sec) << "%)\n";
+        SVFUtil::outs() << "  step5_versionize: " << step5Sec << " (" << pct(step5Sec) << "%)\n";
+        SVFUtil::outs() << "  step6_reliance: " << step6Sec << " (" << pct(step6Sec) << "%)\n";
+        SVFUtil::outs() << "  step7_assign: " << step7Sec << " (" << pct(step7Sec) << "%)\n";
+        SVFUtil::outs() << "  finalize_refs: " << finalizeSec << " (" << pct(finalizeSec) << "%)\n";
+    }
 }
 
 void VersionedFlowSensitive::newmeldLabel(void)
 {
     double start = stat->getClk(true);
 
+    struct MeldLabelProfileTotals
+    {
+        u64_t processedObjects = 0;
+        u64_t dedupSkippedObjects = 0;
+        double setupTicks = 0.0;
+        double step1Ticks = 0.0;
+        double step1SeedTicks = 0.0;
+        double step1SCCInitTicks = 0.0;
+        double step1SCCVisitTicks = 0.0;
+        double step1SCCSortTicks = 0.0;
+        double step2Ticks = 0.0;
+        double step3Ticks = 0.0;
+        double step4Ticks = 0.0;
+        double step5Ticks = 0.0;
+        double step6Ticks = 0.0;
+        double step7Ticks = 0.0;
+        double finalizeTicks = 0.0;
+
+        void addFrom(const MeldLabelProfileTotals &other)
+        {
+            processedObjects += other.processedObjects;
+            dedupSkippedObjects += other.dedupSkippedObjects;
+            step1Ticks += other.step1Ticks;
+            step1SeedTicks += other.step1SeedTicks;
+            step1SCCInitTicks += other.step1SCCInitTicks;
+            step1SCCVisitTicks += other.step1SCCVisitTicks;
+            step1SCCSortTicks += other.step1SCCSortTicks;
+            step2Ticks += other.step2Ticks;
+            step3Ticks += other.step3Ticks;
+            step4Ticks += other.step4Ticks;
+            step5Ticks += other.step5Ticks;
+            step6Ticks += other.step6Ticks;
+            step7Ticks += other.step7Ticks;
+        }
+    };
+
+    const bool enableMeldProfile = Options::VDGStat();
+    const bool enableEquiMergeDump = false;
+    const u64_t equiMergeDumpLimit = 2000;
+    MeldLabelProfileTotals profileTotals;
+    std::mutex profileMutex;
+    std::mutex equiMergeDumpMutex;
+    u64_t equiMergeDumpEmitted = 0;
+    u64_t equiMergeDumpSuppressed = 0;
+    const double setupStartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+
     assert(Options::VersioningThreads() > 0 && "VFS::meldLabel: number of versioning threads must be > 0!");
 
-    // Nodes which have at least one object on them given a prelabel + the Andersen's points-to
-    // set of interest so we don't keep calling getPts. For Store nodes, we'll fill that in, for
-    // MR nodes, we won't as its getPointsTo is cheap.
-    // TODO: preferably we cache both for ease and to avoid the dyn_cast/isa, but Andersen's points-to
-    // sets are PointsTo and MR's sets are NodeBS, which are incompatible types. Maybe when we can
-    // use std::option.
-    std::vector<std::pair<const SVFGNode *, const PointsTo *>> prelabeledNodes;
-    // Fast query for the above.
-    std::vector<bool> isPrelabeled(svfg->getTotalNodeNum(), false);
-    while (!vWorklist.empty())
-    {
-        const NodeID n = vWorklist.pop();
-        isPrelabeled[n] = true;
-
-        const SVFGNode *sn = svfg->getSVFGNode(n);
-        const PointsTo *nPts = nullptr;
-        if (const StoreSVFGNode *store = SVFUtil::dyn_cast<StoreSVFGNode>(sn))
-        {
-            const NodeID p = store->getPAGDstNodeID();
-            nPts = &(this->ander->getPts(p));
-        }
-
-        prelabeledNodes.push_back(std::make_pair(sn, nPts));
-    }
-
-    // Delta, delta source, store, and load nodes, which require versions during
-    // solving, unlike other nodes with which we can make do with the reliance map.
+    // Nodes requiring explicit consume/yield assignment during solving.
     std::vector<NodeID> nodesWhichNeedVersions;
     for (SVFG::const_iterator it = svfg->begin(); it != svfg->end(); ++it)
     {
@@ -534,50 +699,81 @@ void VersionedFlowSensitive::newmeldLabel(void)
     std::mutex objectQueueMutex;
     std::mutex footprintOwnerMutex;
 
+    if (enableMeldProfile)
+        profileTotals.setupTicks = stat->getClk(true) - setupStartTicks;
+
     auto meldVersionWorker = [this, &footprintOwner, &objectQueue,
                                     &objectQueueMutex, &footprintOwnerMutex, &versionMutexes,
-                                    &prelabeledNodes, &isPrelabeled, &nodesWhichNeedVersions]
+                                    &nodesWhichNeedVersions,
+                                    &profileMutex, &profileTotals,
+                                    &equiMergeDumpMutex, &equiMergeDumpEmitted, &equiMergeDumpSuppressed,
+                                    enableMeldProfile]
          (const unsigned thread)
     {
+        (void)thread;
+        MeldLabelProfileTotals localProfile;
+        std::vector<int> partOf;
+        std::vector<const IndirectSVFGEdge *> footprint;
+        auto nodeKind = [this](const NodeID id) -> std::string
+        {
+            std::string kinds;
+            if (this->isLoad(id)) kinds += "load|";
+            if (this->delta(id)) kinds += "delta|";
+            if (this->deltaSource(id)) kinds += "deltasource|";
+            if (this->isStore(id)) kinds += "store|";
+            if (!kinds.empty())
+            {
+                kinds.pop_back();
+                return kinds;
+            }
+            return "other";
+        };
+
         while (true)
         {
             NodeID o;
             {
                 std::lock_guard<std::mutex> guard(objectQueueMutex);
                 // No more objects? Done.
-                if (objectQueue.empty()) return;
+                if (objectQueue.empty()) break;
                 o = objectQueue.front();
                 objectQueue.pop();
             }
 
+            if (enableMeldProfile)
+                ++localProfile.processedObjects;
+
             // 1. Compute the SCCs for the nodes on the graph overlay of o.
             // For starting nodes, we only need those which did prelabeling for o specifically.
-            // TODO: maybe we should move this to prelabel with a map (o -> starting nodes).
-            std::vector<const SVFGNode *> osStartingNodes;
-            for (std::pair<const SVFGNode *, const PointsTo *> snPts : prelabeledNodes)
+            const double step1StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            const double step1SeedStartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            const Map<NodeID, NodeVector>::const_iterator startsIt = objStartingNodes.find(o);
+            static const NodeVector emptyStartingNodes;
+            const NodeVector &osStartingNodes
+                = startsIt == objStartingNodes.end() ? emptyStartingNodes : startsIt->second;
+            if (enableMeldProfile)
+                localProfile.step1SeedTicks += stat->getClk(true) - step1SeedStartTicks;
+
+            SCC::DetectProfile sccDetectProfile;
+            unsigned numSCCs = SCC::detectSCCs(
+                this,
+                this->svfg,
+                o,
+                osStartingNodes,
+                partOf,
+                footprint,
+                enableMeldProfile ? &sccDetectProfile : nullptr);
+            if (enableMeldProfile)
             {
-                const SVFGNode *sn = snPts.first;
-                const PointsTo *pts = snPts.second;
-                if (pts != nullptr)
-                {
-                    if (pts->test(o)) osStartingNodes.push_back(sn);
-                }
-                else if (const MRSVFGNode *mr = SVFUtil::dyn_cast<MRSVFGNode>(sn))
-                {
-                    if (mr->getPointsTo().test(o)) osStartingNodes.push_back(sn);
-                }
-                else
-                {
-                    assert(false && "VFS::meldLabel: unexpected prelabeled node!");
-                }
+                localProfile.step1Ticks += stat->getClk(true) - step1StartTicks;
+                localProfile.step1SCCInitTicks += sccDetectProfile.initTicks;
+                localProfile.step1SCCVisitTicks += sccDetectProfile.visitTicks;
+                localProfile.step1SCCSortTicks += sccDetectProfile.sortTicks;
             }
 
-            std::vector<int> partOf;
-            std::vector<const IndirectSVFGEdge *> footprint;
-            unsigned numSCCs = SCC::detectSCCs(this, this->svfg, o, osStartingNodes, partOf, footprint);
-            this->recordStmt(footprint.size());
-
             // 2. Skip any further processing of a footprint we have seen before.
+            const double step2StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            bool isCanonicalFootprint = true;
             {
                 std::lock_guard<std::mutex> guard(footprintOwnerMutex);
                 const Map<std::vector<const IndirectSVFGEdge *>, NodeID>::const_iterator canonOwner
@@ -590,144 +786,187 @@ void VersionedFlowSensitive::newmeldLabel(void)
                 else
                 {
                     this->equivalentObject[o] = canonOwner->second;
-                    // Reliance maps are kept on canonical objects only and queried through
-                    // equivalentObject mapping at use sites.
-                    continue;
+                    this->recordRepeat(o, canonOwner->second);
+                    isCanonicalFootprint = false;
                 }
             }
 
-            // 3. a. Initialise the MeldVersion of prelabeled nodes (SCCs).
-            //    b. Initialise a todo list of all the nodes we need to version,
-            //       sorted according to topological order.
-            // We will use a map of sccs to meld versions for what is consumed.
-            std::vector<MeldVersion> sccToMeldVersion(numSCCs);
-            // At stores, what is consumed is different to what is yielded, so we
-            // maintain that separately.
-            Map<NodeID, MeldVersion> storesYieldedMeldVersion;
-            // SVFG nodes of interest -- those part of an SCC from the starting nodes.
-            std::vector<NodeID> todoList;
-            unsigned bit = 0;
-            // To calculate reachable nodes, we can see what nodes n exist where
-            // partOf[n] != -1. Since the SVFG can be large this can be expensive.
-            // Instead, we can gather this from the edges in the footprint and
-            // the starting nodes (incase such nodes have no edges).
-            // TODO: should be able to do this better: too many redundant inserts.
-            Set<NodeID> reachableNodes;
-            for (const SVFGNode *sn : osStartingNodes) reachableNodes.insert(sn->getId());
-            for (const SVFGEdge *se : footprint)
+            if (enableMeldProfile)
+                localProfile.step2Ticks += stat->getClk(true) - step2StartTicks;
+
+            if (!isCanonicalFootprint)
             {
-                reachableNodes.insert(se->getSrcNode()->getId());
-                reachableNodes.insert(se->getDstNode()->getId());
+                if (enableMeldProfile)
+                    ++localProfile.dedupSkippedObjects;
+                // Reliance maps are kept on canonical objects only and queried through
+                // equivalentObject mapping at use sites.
+                continue;
             }
 
-            for (const NodeID n : reachableNodes)
+            // 3. Initialize DSU-based equivalence classes for SCC consume versions,
+            // and allocate dedicated yield ids for store nodes.
+            const double step3StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            // SCC ids [0, numSCCs) are the initial DSU nodes.
+            VersionDSU VersionManager(numSCCs);
+            // Stores have distinct yielded versions; keep their EquiVersion ids here.
+            Map<NodeID, EquiVersion> storesYieldedEquiVersion;
+
+            // Build object-local reverse overlay from footprint edges.
+            // in[n]  = predecessors of n on object o's footprint.
+            Map<NodeID, NodeVector> footprintInMap;
+            for (const IndirectSVFGEdge *ie : footprint)
             {
-                if (isPrelabeled[n])
+                const NodeID src = ie->getSrcNode()->getId();
+                const NodeID dst = ie->getDstNode()->getId();
+                footprintInMap[dst].push_back(src);
+            }
+            // Each store node gets a dedicated yield EquiVersion.
+            // Under current SCC traversal rules, store nodes are singleton SCCs.
+            std::vector<int> storeSCC(numSCCs, -1);
+            for (const NodeID node : osStartingNodes)
+            {
+                if (isStore(node) && storesYieldedEquiVersion.find(node) == storesYieldedEquiVersion.end())
                 {
-                    if (this->isStore(n)) storesYieldedMeldVersion[n].set(bit);
-                    else sccToMeldVersion[partOf[n]].set(bit);
-                    ++bit;
+                    storesYieldedEquiVersion[node] = VersionManager.addNode();
+                    const int nSCC = partOf[node];
+                    storeSCC[nSCC] = node;
                 }
-
-                todoList.push_back(n);
             }
 
-            // Sort topologically so each nodes is only visited once.
-            auto cmp = [&partOf](const NodeID a, const NodeID b)
-            {
-                return partOf[a] > partOf[b];
-            };
-            std::sort(todoList.begin(), todoList.end(), cmp);
+            if (enableMeldProfile)
+                localProfile.step3Ticks += stat->getClk(true) - step3StartTicks;
 
-            // 4. a. Do meld versioning.
-            //    b. Determine SCC reliances.
-            //    c. Build a footprint for o (all edges which it is found on).
-            //    d. Determine which SCCs belong to stores.
+            // 4. Build SCC reliance and propagate SCC equivalence rules.
+            const double step4StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
 
             // sccReliance[x] = { y_1, y_2, ... } if there exists an edge from a node
             // in SCC x to SCC y_i.
             std::vector<Set<int>> sccReliance(numSCCs);
-            // Maps SCC to the store it corresponds to or -1 if it doesn't. TODO: unsigned vs signed -- nasty.
-            std::vector<int> storeSCC(numSCCs, -1);
-            for (size_t i = 0; i < todoList.size(); ++i)
+            for (auto it = footprintInMap.begin(); it != footprintInMap.end(); ++it) 
             {
-                const NodeID n = todoList[i];
-                const SVFGNode *sn = this->svfg->getSVFGNode(n);
-                const bool nIsStore = this->isStore(n);
-
+                NodeID n = it->first;
                 int nSCC = partOf[n];
-                if (nIsStore) storeSCC[nSCC] = n;
 
-                // Given n -> m, the yielded version of n will be melded into m.
-                // For stores, that is in storesYieldedMeldVersion, otherwise, consume == yield and
-                // we can just use sccToMeldVersion.
-                const MeldVersion &nMV = nIsStore ? storesYieldedMeldVersion[n] : sccToMeldVersion[nSCC];
-                for (const SVFGEdge *e : sn->getOutEdges())
+                // Given m -> n
+                const Map<NodeID, NodeVector>::const_iterator inIt = footprintInMap.find(n);
+                if (inIt == footprintInMap.end()) continue;
+                const size_t rawPredNum = inIt->second.size();
+                size_t uniquePredNum = rawPredNum;
+                NodeID uniquePred = 0;
+                if (enableEquiMergeDump && rawPredNum > 1)
                 {
-                    const IndirectSVFGEdge *ie = SVFUtil::dyn_cast<IndirectSVFGEdge>(e);
-                    if (!ie) continue;
-
-                    const NodeID m = ie->getDstNode()->getId();
-                    // Ignoreedges which don't involve o.
-                    if (!ie->getPointsTo().test(o)) continue;
-
+                    NodeVector uniquePreds = inIt->second;
+                    std::sort(uniquePreds.begin(), uniquePreds.end());
+                    uniquePreds.erase(std::unique(uniquePreds.begin(), uniquePreds.end()), uniquePreds.end());
+                    uniquePredNum = uniquePreds.size();
+                    if (uniquePredNum == 1)
+                        uniquePred = uniquePreds.front();
+                }
+                if (enableEquiMergeDump && rawPredNum > 1 && uniquePredNum == 1)
+                {
+                    std::lock_guard<std::mutex> dumpGuard(equiMergeDumpMutex);
+                    if (equiMergeDumpEmitted < equiMergeDumpLimit)
+                    {
+                        SVFUtil::outs() << "VFS[newmeldLabel][merge-dump] duplicate footprint preds:"
+                                        << " obj " << o
+                                        << " n " << n << "(" << nodeKind(n) << ",scc " << nSCC << ")"
+                                        << " raw_preds " << rawPredNum
+                                        << " uniq_preds " << uniquePredNum
+                                        << " uniq_pred " << uniquePred << "(" << nodeKind(uniquePred) << ")\n";
+                        ++equiMergeDumpEmitted;
+                    }
+                    else
+                    {
+                        ++equiMergeDumpSuppressed;
+                    }
+                }
+                for (const NodeID m : inIt->second)
+                {
                     int mSCC = partOf[m];
+                    // If predecessor m is a store, merge against its yielded EquiVersion;
+                    // otherwise merge against m's SCC consume EquiVersion.
+                    const EquiVersion mEquiVersion
+                        = isStore(m) ? storesYieldedEquiVersion[m] : static_cast<EquiVersion>(mSCC);
+                    const EquiVersion nEquiVersion = static_cast<EquiVersion>(nSCC);
 
                     // There is an edge from the SCC n belongs to that m belongs to.
-                    sccReliance[nSCC].insert(mSCC);
+                    sccReliance[mSCC].insert(nSCC);
 
-                    // Ignore edges to delta nodes (prelabeled consume).
-                    // No point propagating when n's SCC == m's SCC (same meld version there)
-                    // except when it is a store, because we are actually propagating n's yielded
-                    // into m's consumed. Store nodes are in their own SCCs, so it is a self
-                    // loop on a store node.
-                    if (!this->delta(m) && (nSCC != mSCC || nIsStore))
+                    // If n has exactly one predecessor on the object footprint,
+                    // merge predecessor/destination SCC consume versions.
+                    if (mEquiVersion != nEquiVersion && inIt->second.size() == 1)
                     {
-                        sccToMeldVersion[mSCC] |= nMV;
+                        const bool merged = VersionManager.unite(mEquiVersion, nEquiVersion);
+                        if (enableEquiMergeDump)
+                        {
+                            std::lock_guard<std::mutex> dumpGuard(equiMergeDumpMutex);
+                            if (equiMergeDumpEmitted < equiMergeDumpLimit)
+                            {
+                                SVFUtil::outs() << "VFS[newmeldLabel][merge-dump] merge candidate:"
+                                                << " obj " << o
+                                                << " m " << m << "(" << nodeKind(m) << ",scc " << mSCC << ")"
+                                                << " -> n " << n << "(" << nodeKind(n) << ",scc " << nSCC << ")"
+                                                << " raw_preds " << rawPredNum
+                                                << " uniq_preds " << uniquePredNum
+                                                << " merged " << (merged ? 1 : 0) << "\n";
+                                ++equiMergeDumpEmitted;
+                            }
+                            else
+                            {
+                                ++equiMergeDumpSuppressed;
+                            }
+                        }
                     }
                 }
             }
+            if (enableMeldProfile)
+                localProfile.step4Ticks += stat->getClk(true) - step4StartTicks;
 
-            // 5. Transform meld versions belonging to SCCs into versions.
-            Map<MeldVersion, Version> mvv;
+            // 5. Compress DSU reps into dense Version ids.
+            const double step5StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
+            Map<EquiVersion, Version> mvv;
             std::vector<Version> sccToVersion(numSCCs, invalidVersion);
             Version curVersion = 0;
-            for (u32_t scc = 0; scc < sccToMeldVersion.size(); ++scc)
+            for (u32_t scc = 0; scc < numSCCs; ++scc)
             {
-                const MeldVersion &mv = sccToMeldVersion[scc];
-                Map<MeldVersion, Version>::const_iterator foundVersion = mvv.find(mv);
+                const EquiVersion &mv = VersionManager.find(scc);
+                Map<EquiVersion, Version>::const_iterator foundVersion = mvv.find(mv);
                 Version v = foundVersion == mvv.end() ? mvv[mv] = ++curVersion : foundVersion->second;
                 sccToVersion[scc] = v;
             }
 
-            sccToMeldVersion.clear();
-
-            // Same for storesYieldedMeldVersion.
+            // Do the same mapping for store yielded EquiVersion ids.
+            // Note: store yielded ids may have been unified in VersionManager,
+            // so canonicalize via find() before mapping to final Version.
             Map<NodeID, Version> storesYieldedVersion;
             Map<NodeID, Version> loadsConsumedVersion;
-            for (auto const& nmv : storesYieldedMeldVersion)
+            for (auto const& nmv : storesYieldedEquiVersion)
             {
                 const NodeID n = nmv.first;
-                const MeldVersion &mv = nmv.second;
+                const EquiVersion &mv = nmv.second;
+                const EquiVersion rep = VersionManager.find(mv);
 
-                Map<MeldVersion, Version>::const_iterator foundVersion = mvv.find(mv);
-                Version v = foundVersion == mvv.end() ? mvv[mv] = ++curVersion : foundVersion->second;
+                Map<EquiVersion, Version>::const_iterator foundVersion = mvv.find(rep);
+                Version v = foundVersion == mvv.end() ? mvv[rep] = ++curVersion : foundVersion->second;
                 storesYieldedVersion[n] = v;
             }
 
-            storesYieldedMeldVersion.clear();
+            storesYieldedEquiVersion.clear();
 
             mvv.clear();
-            this->recordVersion(curVersion);
+            this->recordVersionForObj(o, curVersion);
+            if (enableMeldProfile)
+                localProfile.step5Ticks += stat->getClk(true) - step5StartTicks;
 
             // 6. From SCC reliance, determine version reliances.
+            const double step6StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
             Map<Version, std::vector<Version>> &osVersionReliance = this->versionReliance.at(o);
             for (u32_t scc = 0; scc < numSCCs; ++scc)
             {
                 if (sccReliance[scc].empty()) continue;
 
-                // Some consume relies on a yield. When it's a store, we need to pick whether to
-                // use the consume or yield unlike when it is not because they are the same.
+                // Reliance source uses store-yield Version when the predecessor SCC is store-backed;
+                // otherwise it uses the SCC consume Version.
                 const Version version
                     = storeSCC[scc] != -1 ? storesYieldedVersion[storeSCC[scc]] : sccToVersion[scc];
 
@@ -742,10 +981,13 @@ void VersionedFlowSensitive::newmeldLabel(void)
                     }
                 }
             }
+            if (enableMeldProfile)
+                localProfile.step6Ticks += stat->getClk(true) - step6StartTicks;
 
             // 7. a. Save versions for nodes which need them.
             //    b. Fill in stmtReliance.
             // TODO: maybe randomize iteration order for less contention? Needs profiling.
+            const double step7StartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
             Map<Version, NodeBS> &osStmtReliance = this->stmtReliance.at(o);
             for (size_t i = 0; i < nodesWhichNeedVersions.size(); ++i)
             {
@@ -771,12 +1013,28 @@ void VersionedFlowSensitive::newmeldLabel(void)
                     if (yIt != storesYieldedVersion.end()) this->setYield(n, o, yIt->second);
                 }
             }
+            if (enableMeldProfile)
+                localProfile.step7Ticks += stat->getClk(true) - step7StartTicks;
+        }
+
+        if (enableMeldProfile)
+        {
+            std::lock_guard<std::mutex> guard(profileMutex);
+            profileTotals.addFrom(localProfile);
         }
     };
 
     std::vector<std::thread> workers;
     for (unsigned i = 0; i < Options::VersioningThreads(); ++i) workers.push_back(std::thread(meldVersionWorker, i));
     for (std::thread &worker : workers) worker.join();
+    if (enableEquiMergeDump)
+    {
+        SVFUtil::outs() << "VFS[newmeldLabel][merge-dump] emitted: " << equiMergeDumpEmitted
+                        << ", suppressed: " << equiMergeDumpSuppressed
+                        << ", limit: " << equiMergeDumpLimit << "\n";
+    }
+
+    const double finalizeStartTicks = enableMeldProfile ? stat->getClk(true) : 0.0;
 
     // Fill equivalent objects with references to canonical reliance maps.
     versionRelianceRef.clear();
@@ -789,10 +1047,64 @@ void VersionedFlowSensitive::newmeldLabel(void)
         stmtRelianceRef[o] = &stmtReliance[canon];
     }
 
+    if (enableMeldProfile)
+        profileTotals.finalizeTicks = stat->getClk(true) - finalizeStartTicks;
+
     delete[] versionMutexes;
 
     double end = stat->getClk(true);
     meldLabelingTime = (end - start) / TIMEINTERVAL;
+
+    if (enableMeldProfile)
+    {
+        const double setupSec = profileTotals.setupTicks / TIMEINTERVAL;
+        const double step1Sec = profileTotals.step1Ticks / TIMEINTERVAL;
+        const double step1SeedSec = profileTotals.step1SeedTicks / TIMEINTERVAL;
+        const double step1SCCInitSec = profileTotals.step1SCCInitTicks / TIMEINTERVAL;
+        const double step1SCCVisitSec = profileTotals.step1SCCVisitTicks / TIMEINTERVAL;
+        const double step1SCCSortSec = profileTotals.step1SCCSortTicks / TIMEINTERVAL;
+        const double step2Sec = profileTotals.step2Ticks / TIMEINTERVAL;
+        const double step3Sec = profileTotals.step3Ticks / TIMEINTERVAL;
+        const double step4Sec = profileTotals.step4Ticks / TIMEINTERVAL;
+        const double step5Sec = profileTotals.step5Ticks / TIMEINTERVAL;
+        const double step6Sec = profileTotals.step6Ticks / TIMEINTERVAL;
+        const double step7Sec = profileTotals.step7Ticks / TIMEINTERVAL;
+        const double finalizeSec = profileTotals.finalizeTicks / TIMEINTERVAL;
+
+        const double accumulatedSec =
+            setupSec + step1Sec + step2Sec + step3Sec + step4Sec + step5Sec + step6Sec + step7Sec + finalizeSec;
+        auto pct = [accumulatedSec](double sec) -> double
+        {
+            return accumulatedSec > 0.0 ? (100.0 * sec / accumulatedSec) : 0.0;
+        };
+        auto step1Pct = [step1Sec](double sec) -> double
+        {
+            return step1Sec > 0.0 ? (100.0 * sec / step1Sec) : 0.0;
+        };
+
+        SVFUtil::outs() << "VFS meldLabel profiling:\n";
+        SVFUtil::outs() << "  objects processed: " << profileTotals.processedObjects
+                        << ", dedup skipped: " << profileTotals.dedupSkippedObjects << "\n";
+        SVFUtil::outs() << "  wall total (sec): " << meldLabelingTime << "\n";
+        SVFUtil::outs() << "  accumulated step total (sec): " << accumulatedSec << "\n";
+        SVFUtil::outs() << "  setup: " << setupSec << " (" << pct(setupSec) << "%)\n";
+        SVFUtil::outs() << "  step1_scc: " << step1Sec << " (" << pct(step1Sec) << "%)\n";
+        SVFUtil::outs() << "    step1_seed_select: " << step1SeedSec
+                        << " (" << step1Pct(step1SeedSec) << "% of step1)\n";
+        SVFUtil::outs() << "    step1_scc_init: " << step1SCCInitSec
+                        << " (" << step1Pct(step1SCCInitSec) << "% of step1)\n";
+        SVFUtil::outs() << "    step1_scc_visit: " << step1SCCVisitSec
+                        << " (" << step1Pct(step1SCCVisitSec) << "% of step1)\n";
+        SVFUtil::outs() << "    step1_footprint_sort: " << step1SCCSortSec
+                        << " (" << step1Pct(step1SCCSortSec) << "% of step1)\n";
+        SVFUtil::outs() << "  step2_dedup: " << step2Sec << " (" << pct(step2Sec) << "%)\n";
+        SVFUtil::outs() << "  step3_init: " << step3Sec << " (" << pct(step3Sec) << "%)\n";
+        SVFUtil::outs() << "  step4_meld: " << step4Sec << " (" << pct(step4Sec) << "%)\n";
+        SVFUtil::outs() << "  step5_versionize: " << step5Sec << " (" << pct(step5Sec) << "%)\n";
+        SVFUtil::outs() << "  step6_reliance: " << step6Sec << " (" << pct(step6Sec) << "%)\n";
+        SVFUtil::outs() << "  step7_assign: " << step7Sec << " (" << pct(step7Sec) << "%)\n";
+        SVFUtil::outs() << "  finalize_refs: " << finalizeSec << " (" << pct(finalizeSec) << "%)\n";
+    }
 }
 
 void VersionedFlowSensitive::expandEquivalentObjectVersions(void)
