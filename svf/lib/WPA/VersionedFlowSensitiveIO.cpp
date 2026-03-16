@@ -8,68 +8,12 @@
 
 #include "WPA/VersionedFlowSensitive.h"
 #include "Util/SVFUtil.h"
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <system_error>
 
 using namespace SVF;
-
-void VersionedFlowSensitive::dumpReliances(void) const
-{
-    SVFUtil::outs() << "# Version reliances\n";
-    for (const Map<NodeID, Map<Version, std::vector<Version>>>::value_type &ovrv : versionReliance)
-    {
-        NodeID o = ovrv.first;
-        SVFUtil::outs() << "  Object " << o << "\n";
-        for (const Map<Version, std::vector<Version>>::value_type& vrv : ovrv.second)
-        {
-            Version v = vrv.first;
-            SVFUtil::outs() << "    Version " << v << " is a reliance for: ";
-
-            bool first = true;
-            for (Version rv : vrv.second)
-            {
-                if (!first)
-                {
-                    SVFUtil::outs() << ", ";
-                }
-
-                SVFUtil::outs() << rv;
-                first = false;
-            }
-
-            SVFUtil::outs() << "\n";
-        }
-    }
-
-    SVFUtil::outs() << "# Statement reliances\n";
-    for (const Map<NodeID, Map<Version, NodeBS>>::value_type &ovss : stmtReliance)
-    {
-        NodeID o = ovss.first;
-        SVFUtil::outs() << "  Object " << o << "\n";
-
-        for (const Map<Version, NodeBS>::value_type &vss : ovss.second)
-        {
-            Version v = vss.first;
-            SVFUtil::outs() << "    Version " << v << " is a reliance for statements: ";
-
-            const NodeBS &ss = vss.second;
-            bool first = true;
-            for (NodeID s : ss)
-            {
-                if (!first)
-                {
-                    SVFUtil::outs() << ", ";
-                }
-
-                SVFUtil::outs() << s;
-                first = false;
-            }
-
-            SVFUtil::outs() << "\n";
-        }
-    }
-}
 
 void VersionedFlowSensitive::drawVersionDependencyGraph(const std::string& filename) const
 {
@@ -82,6 +26,15 @@ void VersionedFlowSensitive::drawVersionDependencyGraph(const std::string& filen
 void VersionedFlowSensitive::dumpLocVersionMaps(void) const
 {
     SVFUtil::outs() << "# LocVersion Maps\n";
+    NodeVector objects;
+    objects.reserve(consume.size() + yield.size());
+    for (const ObjToLocVersionMap::value_type &ov : consume)
+        objects.push_back(ov.first);
+    for (const ObjToLocVersionMap::value_type &ov : yield)
+        objects.push_back(ov.first);
+    std::sort(objects.begin(), objects.end());
+    objects.erase(std::unique(objects.begin(), objects.end()), objects.end());
+
     for (SVFG::iterator it = svfg->begin(); it != svfg->end(); ++it)
     {
         const NodeID loc = it->first;
@@ -90,9 +43,8 @@ void VersionedFlowSensitive::dumpLocVersionMaps(void) const
         auto dumpAtLoc = [&](const bool useYield)
         {
             bool first = true;
-            for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
+            for (const NodeID o : objects)
             {
-                const NodeID o = kv.first;
                 const Version v = useYield ? getYield(loc, o) : getConsume(loc, o);
                 if (v == invalidVersion) continue;
                 if (!locPrinted)

@@ -22,7 +22,6 @@
 #include "WPA/WPAFSSolver.h"
 #include "MemoryModel/PointsTo.h"
 #include <memory>
-#include <mutex>
 
 namespace SVF
 {
@@ -48,8 +47,6 @@ public:
     typedef Map<NodeID, LocToVersionMapPtr> ObjToLocVersionMap;
     /// (o -> (v -> versions with rely on o:v).
     typedef Map<NodeID, Map<Version, std::vector<Version>>> VersionRelianceMap;
-    typedef Map<NodeID, const Map<Version, std::vector<Version>> *> VersionRelianceRefMap;
-    typedef Map<NodeID, Map<Version, NodeBS> *> StmtRelianceRefMap;
 
     /// If this version appears, there has been an error.
     static const Version invalidVersion;
@@ -166,15 +163,12 @@ public:
     /// Returns the statements which rely on o:v.
     NodeBS &getStmtReliance(const NodeID o, const Version v);
 
-    /// Dumps versionReliance and stmtReliance.
-    void dumpReliances(void) const;
-
     void drawVersionDependencyGraph(const std::string& filename) const;
 
     /// Dumps maps consume and yield.
     void dumpLocVersionMaps(void) const;
 
-    /// Dumps custom profiling counters (countnum:occurnum).
+    /// Dumps per-object stmt count summary collected during SCC detection.
     void dumpOriginalData(void) const;
 
     void solveAndwritePtsToFile(const std::string& filename) override;
@@ -191,9 +185,10 @@ public:
 private:
     /// Prelabel the SVFG: set y(o) for stores and c(o) for delta nodes to a new version.
     void prelabel(void);
-    /// Meld label the prelabeled SVFG.
-    void meldLabel(void);
-    void newmeldLabel(void);
+    /// Run a standard worklist slice before versioning, skipping load/store solving.
+    void computeBot(void);
+    /// Build VDG in object-major pipeline (includes labeling/materialization/simplify/bind).
+    void buildVDG(void);
     /// Melds v2 into v1 (in place), returns whether a change occurred.
     static bool meld(MeldVersion &mv1, const MeldVersion &mv2);
 
@@ -206,11 +201,7 @@ private:
     /// Fills in deltaMap and deltaSourceMap for the SVFG.
     virtual void buildDeltaMaps(void);
 
-    void recordStmt(u32_t countNum);
-    void recordVersion(u32_t countNum);
     void recordStmtForObj(NodeID o, u32_t countNum);
-    void recordVersionForObj(NodeID o, u32_t countNum);
-    void recordRepeat(NodeID o, NodeID canon);
 
     /// Returns true if l is a delta node, i.e., may get a new incoming indirect
     /// edge due to on-the-fly callgraph construction.
@@ -229,11 +220,6 @@ private:
     /// Sets the yielded version of o at l to v.
     void setYield(const NodeID l, const NodeID o, const Version v);
 
-    void expandEquivalentObjectVersions(void);
-    void buildVersionDependencyGraphs(void);
-    /// Materialize stmt reliance onto (already-merged) VDG rep nodes.
-    void bindStmtRelianceToVDGNodes(void);
-    
     inline VDGManager& getVDGManager()
     {
         return vdgManager;
@@ -258,27 +244,8 @@ private:
 
     /// o -> (version -> versions which rely on it).
     VersionRelianceMap versionReliance;
-    /// Object -> reference to canonical version reliance map.
-    VersionRelianceRefMap versionRelianceRef;
     /// o x version -> statement nodes which rely on that o/version.
     Map<NodeID, Map<Version, NodeBS>> stmtReliance;
-    /// Object -> reference to canonical statement reliance map.
-    StmtRelianceRefMap stmtRelianceRef;
-
-    // Maps an object o to o' if o is equivalent to o' with respect to
-    // versioning. Thus, we don't need to store the versions of o and look
-    // up those for o' instead.
-    Map<NodeID, NodeID> equivalentObject;
-
-    inline NodeID canonicalObject(const NodeID o) const
-    {
-        const Map<NodeID, NodeID>::const_iterator it = equivalentObject.find(o);
-        return it == equivalentObject.end() ? o : it->second;
-    }
-
-    /// Worklist for performing meld labeling, takes SVFG node l.
-    /// Nodes are added when the version they yield is changed.
-    FIFOWorkList<NodeID> vWorklist;
 
     /// Priority worklists for staged processing
     /// Priority 0: Load nodes (processed first — produces data for other stmts)
@@ -309,7 +276,7 @@ private:
     }
 
     Set<NodeID> prelabeledObjects;
-    /// Object -> prelabel starting SVFG node ids used by meldLabel step1.
+    /// Object -> prelabel starting SVFG node ids used by buildVDG step1.
     Map<NodeID, NodeVector> objStartingNodes;
 
     /// Points-to DS for working with versions.
@@ -330,13 +297,8 @@ private:
     /// isLoadMap[l] means SVFG node l is a load node.
     std::vector<bool> isLoadMap;
 
-    typedef Map<u32_t, u64_t> CountHistogram;
-    CountHistogram stmtcount;
-    CountHistogram versioncount;
     typedef Map<NodeID, u32_t> ObjCountMap;
     ObjCountMap objStmtCount;
-    ObjCountMap objVersionCount;
-    mutable std::mutex statRecordMutex;
 
     /// Additional statistics.
     //@{
@@ -344,10 +306,8 @@ private:
     u32_t numPrelabelVersions; ///< Number of versions created during prelabeling.
 
     double prelabelingTime;  ///< Time to prelabel SVFG.
-    double meldLabelingTime; ///< Time to meld label SVFG.
     double versionPropTime;  ///< Time to propagate versions to versions which rely on them.
-    double vdgBuildTime;     ///< Time to build VDG after meld labeling.
-    double vdgSimplifyTime;  ///< Time to simplify VDG.
+    double vdgBuildTime;     ///< Time to execute the full buildVDG pipeline.
     //@}
 
     class VersionDSU

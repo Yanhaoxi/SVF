@@ -39,6 +39,8 @@
 
 using namespace SVF;
 
+bool VDG::solvePhaseStarted_ = false;
+
 namespace
 {
 
@@ -327,13 +329,13 @@ void VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
         repsToMerge.set(subRep);
     }
 
-    for (unsigned subRepU : repsToMerge)
+    for (Version subRep : repsToMerge)
     {
-        const Version subRep = static_cast<Version>(subRepU);
         VDGNode* subNode = getNode(subRep);
 
         repNode->setLoadConsume(subNode->isLoadConsume());
         repNode->setStoreYield(subNode->isStoreYield());
+        // Keep stmt-to-node binding semantics stable across all phases.
         repNode->mergeStmtReliance(subNode->getStmtRelianceSet());
 
         moveEdgesToRep(subRep, repVer);
@@ -341,6 +343,9 @@ void VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
         NodeBS movedSubs = std::move(subVec_[subRep]);
         if (movedSubs.empty())
             movedSubs.set(subRep);
+
+        if (isSolvePhaseStarted())
+            pendingMergedSubs_.push_back(subRep);
 
         for (unsigned subU : movedSubs)
         {
@@ -545,7 +550,6 @@ void VDG::reverseReachMergeByAnchors()
 void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback onChanged)
 {
     assert(hasPendingUpdates() && "propagateInTopoOrder called with no pending updates");
-
     NodeBS initialUpdated;
     NodeVector seeds;
     seeds.reserve(updatedNodes_.size());
@@ -556,8 +560,6 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
             continue;
 
         const Version rep = getRepVersion(v);
-        if (!isSuperVersion(rep))
-            continue;
 
         if (!initialUpdated.test(rep))
         {
@@ -584,28 +586,22 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
             updatedSet.set(rep);
     }
 
-    // If SCC merging happened during solving, sub-version points-to data may already
-    // exist and must be unioned into the rep key.
-    for (Version repV : topoOrder)
+    // Solve-stage lightweight strategy: only sync newly-merged sub reps.
+    for (const Version subRep : pendingMergedSubs_)
     {
+        if (!hasVersion(subRep))
+            continue;
+        const Version repV = getRepVersion(subRep);
         if (!hasVersion(repV) || !isSuperVersion(repV))
             continue;
-
-        const NodeBS& subs = getSubVersions(repV);
-        if (subs.count() <= 1)
+        if (subRep == repV)
             continue;
 
-        for (unsigned subU : subs)
-        {
-            const Version sub = static_cast<Version>(subU);
-            if (sub == repV)
-                continue;
-
-            if (propagate(sub, repV))
-                updatedSet.set(repV);
-        }
+        if (propagate(subRep, repV))
+            updatedSet.set(repV);
     }
-
+    
+    pendingMergedSubs_.clear();
     for (Version repV : topoOrder)
     {
         if (!hasVersion(repV) || !isSuperVersion(repV))
@@ -761,16 +757,14 @@ void reduceByStableReachabilityInternal(VDG& graph,
         if (isSolid)
         {
             NodeBS& neighborMust = must[neighbor];
-            const unsigned oldMust = neighborMust.count();
-            neighborMust |= must[src];
-            if (neighborMust.count() != oldMust)
+            const bool mustChanged = (neighborMust |= must[src]);
+            if (mustChanged)
                 changed = true;
         }
 
         NodeBS& neighborMay = may[neighbor];
-        const unsigned oldMay = neighborMay.count();
-        neighborMay |= may[src];
-        if (neighborMay.count() != oldMay)
+        const bool mayChanged = (neighborMay |= may[src]);
+        if (mayChanged)
             changed = true;
 
         if (changed && !inWorklist.test(neighbor))
@@ -934,7 +928,7 @@ void VDG::reduceByStableDstReachability()
                                        });
 }
 
-void VDG::chainContraction()
+void VDG::chainContraction(const NodeVector* seeds)
 {
     NodeBS inWorklist;
     NodeVector worklist;
@@ -1020,7 +1014,15 @@ void VDG::chainContraction()
         return true;
     };
 
-    forEachSuperNode([&](Version v, VDGNode*) { enqueue(v); });
+    if (seeds && !seeds->empty())
+    {
+        for (Version v : *seeds)
+            enqueue(v);
+    }
+    else
+    {
+        forEachSuperNode([&](Version v, VDGNode*) { enqueue(v); });
+    }
 
     while (!worklist.empty())
     {
@@ -1094,6 +1096,8 @@ void VDG::enterSolve()
     // Transition from build/simplify to solve.
     removeAllVirtualEdges();
     clearUpdates();
+    setSolvePhaseStarted(true);
+    pendingMergedSubs_.clear();
 }
 
 void VDG::dump(const std::string& filename)
@@ -1111,12 +1115,14 @@ void VDG::view()
 
 void VDGManager::enterSolveAll()
 {
+    VDG::setSolvePhaseStarted(true);
     for (auto& entry : vdgMap)
     {
         if (entry.second)
             entry.second->enterSolve();
     }
     pendingVDGs.clear();
+    pendingEdgeUpdatesByObj.clear();
 }
 
 void VDGManager::dumpStats() const

@@ -222,14 +222,12 @@ private:
 
     /// Number of equivalent-object classes.
     u32_t _NumEquivClasses;
-    /// Total number of objects in equivalentObject map.
+    /// Total number of objects participating in version maps.
     u32_t _TotalEquivObjs;
     /// Number of singleton equivalence classes.
     u32_t _NumSingletonClasses;
     /// Max size of an equivalence class.
     u32_t _MaxEquivClassSize;
-    /// Number of non-canonical objects (expanded during expandEquivalentObjectVersions).
-    u32_t _NumExpandedObjs;
 };
 } // End namespace SVF
 

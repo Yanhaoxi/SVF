@@ -20,9 +20,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <queue>
-#include <thread>
-#include <mutex>
 
 using namespace SVF;
 
@@ -39,13 +36,8 @@ VersionedFlowSensitive::VersionedFlowSensitive(SVFIR *_pag, PTATY type)
     : FlowSensitive(_pag, type)
 {
     numPrelabeledNodes = numPrelabelVersions = 0;
-    prelabelingTime = meldLabelingTime = versionPropTime = vdgBuildTime = 0.0;
+    prelabelingTime = versionPropTime = vdgBuildTime = 0.0;
     // We'll grab vPtD in initialize.
-
-    for (SVFIR::const_iterator it = pag->begin(); it != pag->end(); ++it)
-    {
-        if (SVFUtil::isa<ObjVar>(it->second)) equivalentObject[it->first] = it->first;
-    }
 
     assert(!Options::OPTSVFG() && "VFS: -opt-svfg not currently supported with VFS.");
 }
@@ -53,28 +45,23 @@ VersionedFlowSensitive::VersionedFlowSensitive(SVFIR *_pag, PTATY type)
 void VersionedFlowSensitive::initialize()
 {
     FlowSensitive::initialize();
+    VDG::setSolvePhaseStarted(false);
     // Overwrite the stat FlowSensitive::initialize gave us.
     delete stat;
     stat = new VersionedFlowSensitiveStat(this);
 
     vPtD = getVersionedPTDataTy();
-    stmtcount.clear();
-    versioncount.clear();
     objStmtCount.clear();
-    objVersionCount.clear();
-
     buildIsStoreLoadMaps();
     buildDeltaMaps();
     stmtPtsCache.clear();
     stmtPtsCache.resize(svfg->getTotalNodeNum());
-
+    const double computeBotStart = stat->getClk(true);
+    computeBot();
+    SVFUtil::outs() << "computeBotTime\t" << (stat->getClk(true) - computeBotStart) / TIMEINTERVAL << "\n";
     prelabel();
-    if(Options::NewVersionGen()){newmeldLabel();}
-    else{meldLabel();}
-    expandEquivalentObjectVersions();
-    // Build VDGs in object-major streaming mode and simplify each graph in-place.
-    buildVersionDependencyGraphs();
-    bindStmtRelianceToVDGNodes();
+    // Build VDGs in object-major streaming mode (includes simplify + stmt-reliance bind).
+    buildVDG();
 
     if (Options::DumpVDG())
     {
@@ -87,6 +74,9 @@ void VersionedFlowSensitive::initialize()
         dumpOriginalData();
     }
 
+    // Switch all VDGs to solve stage once build/simplify/materialization is done.
+    vdgManager.enterSolveAll();
+
     removeAllIndirectSVFGEdges();
 }
 
@@ -94,7 +84,6 @@ void VersionedFlowSensitive::finalize()
 {
     FlowSensitive::finalize();
     // vPtD->dumpPTData();
-    // dumpReliances();
     // dumpLocVersionMaps();
     if (Options::DumpVDG())
     {
@@ -106,106 +95,40 @@ void VersionedFlowSensitive::finalize()
         vdgManager.dumpStats();
 }
 
-void VersionedFlowSensitive::recordStmt(u32_t countNum)
-{
-    if (!Options::VDGStat())
-        return;
-    std::lock_guard<std::mutex> guard(statRecordMutex);
-    ++stmtcount[countNum];
-}
-
-void VersionedFlowSensitive::recordVersion(u32_t countNum)
-{
-    if (!Options::VDGStat())
-        return;
-    std::lock_guard<std::mutex> guard(statRecordMutex);
-    ++versioncount[countNum];
-}
-
 void VersionedFlowSensitive::recordStmtForObj(NodeID o, u32_t countNum)
 {
     if (!Options::VDGStat())
         return;
 
-    std::lock_guard<std::mutex> guard(statRecordMutex);
-    ++stmtcount[countNum];
     objStmtCount[o] = countNum;
-}
-
-void VersionedFlowSensitive::recordVersionForObj(NodeID o, u32_t countNum)
-{
-    if (!Options::VDGStat())
-        return;
-
-    std::lock_guard<std::mutex> guard(statRecordMutex);
-    ++versioncount[countNum];
-    objVersionCount[o] = countNum;
-}
-
-void VersionedFlowSensitive::recordRepeat(NodeID o, NodeID canon)
-{
-    if (!Options::VDGStat())
-        return;
-
-    // Duplicates reuse canonical counts; output resolves by equivalentObject.
-    std::lock_guard<std::mutex> guard(statRecordMutex);
-    const ObjCountMap::const_iterator stmtIt = objStmtCount.find(canon);
-    if (stmtIt != objStmtCount.end())
-        objStmtCount[o] = stmtIt->second;
-    const ObjCountMap::const_iterator verIt = objVersionCount.find(canon);
-    if (verIt != objVersionCount.end())
-        objVersionCount[o] = verIt->second;
 }
 
 void VersionedFlowSensitive::dumpOriginalData(void) const
 {
     u64_t stmtTotal = 0;
-    u64_t versionTotal = 0;
     u32_t stmtMax = 0;
-    u32_t versionMax = 0;
     NodeID stmtMaxObj = 0;
-    NodeID versionMaxObj = 0;
-    u64_t objCount = 0;
+    const u64_t stmtObjCount = objStmtCount.size();
 
     SVFUtil::outs() << "objstmtcount (obj:stmtnum)\n";
-    for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
+    for (const ObjCountMap::value_type &ov : objStmtCount)
     {
-        const NodeID o = kv.first;
-        const NodeID canon = kv.second;
-        const ObjCountMap::const_iterator it = objStmtCount.find(canon);
-        const u32_t value = it == objStmtCount.end() ? 0 : it->second;
+        const NodeID o = ov.first;
+        const u32_t value = ov.second;
         stmtTotal += value;
         if (value > stmtMax)
         {
             stmtMax = value;
             stmtMaxObj = o;
         }
-        ++objCount;
     }
 
-    SVFUtil::outs() << "objversioncount (obj:versionnum)\n";
-    for (const Map<NodeID, NodeID>::value_type &kv : equivalentObject)
-    {
-        const NodeID o = kv.first;
-        const NodeID canon = kv.second;
-        const ObjCountMap::const_iterator it = objVersionCount.find(canon);
-        const u32_t value = it == objVersionCount.end() ? 0 : it->second;
-        versionTotal += value;
-        if (value > versionMax)
-        {
-            versionMax = value;
-            versionMaxObj = o;
-        }
-    }
-
-    const double stmtAvg = objCount == 0 ? 0.0 : static_cast<double>(stmtTotal) / static_cast<double>(objCount);
-    const double versionAvg = objCount == 0 ? 0.0 : static_cast<double>(versionTotal) / static_cast<double>(objCount);
+    const double stmtAvg = stmtObjCount == 0
+        ? 0.0
+        : static_cast<double>(stmtTotal) / static_cast<double>(stmtObjCount);
     SVFUtil::outs() << "objstmtcount summary total:" << stmtTotal
                     << " max:" << stmtMax << "@" << stmtMaxObj
                     << " avg:" << stmtAvg << "\n";
-    SVFUtil::outs() << "objversioncount summary total:" << versionTotal
-                    << " max:" << versionMax << "@" << versionMaxObj
-                    << " avg:" << versionAvg << "\n";
 }
 
 bool VersionedFlowSensitive::meld(MeldVersion &mv1, const MeldVersion &mv2)
@@ -328,6 +251,42 @@ void VersionedFlowSensitive::removeAllIndirectSVFGEdges(void)
     setGraph(svfg);
 }
 
+void VersionedFlowSensitive::computeBot(void)
+{
+    // Slice of the standard solveConstraints loop:
+    // - Seed worklist with address nodes only.
+    // - Keep SCC/updateCallGraph outer fixpoint.
+    // - Skip memory-deref behaviors (load/store) in node processing.
+
+    // Clear any residual nodes from priority worklists.
+    while (!isWorklistEmpty())
+        (void)popFromWorklist();
+
+    // Init with addr nodes only.
+    for (SVFG::const_iterator it = svfg->begin(); it != svfg->end(); ++it)
+    {
+        if (SVFUtil::isa<AddrSVFGNode>(it->second))
+            pushIntoWorklist(it->first);
+    }
+
+    do
+    {
+        callGraphSCC->find();
+
+        while (!isWorklistEmpty())
+        {
+            const NodeID nodeId = popFromWorklist();
+            const SVFGNode *node = svfg->getSVFGNode(nodeId);
+            if (SVFUtil::isa<LoadSVFGNode, StoreSVFGNode>(node))
+                continue;
+
+            processNode(nodeId);
+            collapseFields();
+        }
+    }
+    while (updateCallGraph(getIndirectCallsites()));
+}
+
 void VersionedFlowSensitive::solveWorklist()
 {
     // Main solving loop: alternate between stmt worklist and version propagation
@@ -366,9 +325,18 @@ void VersionedFlowSensitive::propagateAllVersions()
     {
         const NodeID obj = vdgManager.popPendingVDG();
         VDG *graph = vdgManager.getVDG(obj);
-        
+
+        NodeVector edgeSeeds;
+        if (vdgManager.takePendingEdgeUpdates(obj, edgeSeeds) && edgeSeeds.size() > 1)
+        {
+            std::sort(edgeSeeds.begin(), edgeSeeds.end());
+            edgeSeeds.erase(std::unique(edgeSeeds.begin(), edgeSeeds.end()), edgeSeeds.end());
+        }
+        if (!edgeSeeds.empty())
+            graph->chainContraction(&edgeSeeds);
+
         assert(graph->hasPendingUpdates() && "VFS::propagateAllVersions: pending VDG should have updates!");
-        
+
         // Define propagation callback: union pts from srcV to dstV
         auto propagateCallback = [this, obj](Version srcV, Version dstV) -> bool
         {
@@ -376,7 +344,7 @@ void VersionedFlowSensitive::propagateAllVersions()
             const VersionedVar dstVar = atKey(obj, dstV);
             return vPtD->unionPts(dstVar, srcVar);
         };
-        
+
         // Define stmt reliance callback: push related stmts to worklist and clear load cache.
         // Reliance is bound onto rep nodes and merged during VDG node merges.
         auto stmtRelianceCallback = [this, obj, graph](Version v)
@@ -384,15 +352,19 @@ void VersionedFlowSensitive::propagateAllVersions()
             const NodeBS& stmts = graph->getStmtReliance(v);
             for (NodeID s : stmts)
             {
-                // stmtReliance is load-only (set in meldLabel).
-                // Clear the specific object bit so processLoad's delta includes it.
+                // stmtReliance is load-only (set in buildVDG).
+                // Only invalidate-and-requeue when this object was already processed
+                // by the load; untouched bits are left as-is.
                 assert((isLoad(s)) && "VFS::stmtRelianceCallback: unexpected stmt kind");
                 assert(s < stmtPtsCache.size() && "stmtPtsCache must be pre-sized to SVFG node count");
-                stmtPtsCache[s].reset(obj);
+                PointsTo &cachedQPts = stmtPtsCache[s];
+                if (!cachedQPts.test(obj))
+                    continue;
+                cachedQPts.reset(obj);
                 pushIntoWorklist(s);
             }
         };
-        
+
         // Use VDG's propagation API
         graph->propagateInTopoOrder(propagateCallback, stmtRelianceCallback);
     }
@@ -453,8 +425,9 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
                 if (!graph->hasVersion(srcY) || !graph->hasVersion(dstC)) continue;
                 // Use addEdge with version (auto-converts to rep)
                 if(graph->addEdge(srcY, dstC, false)){
-                    // Mark source as updated for batch propagation
+                    // Mark source as updated for batch propagation and record both endpoints.
                     vdgManager.markEdgeAdded(o, srcY);
+                    vdgManager.markEdgeEndpoint(o, dstC);
                 }
             }
         }
@@ -617,7 +590,10 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
                 && graph && graph->hasVersion(c) && graph->hasVersion(y))
             {
                 if (graph->addEdge(c, y, false))
+                {
                     vdgManager.markEdgeAdded(o, c);
+                    vdgManager.markEdgeEndpoint(o, y);
+                }
             }
         }
 
@@ -705,8 +681,8 @@ void VersionedFlowSensitive::cluster(void)
         unsigned v = pit->first;
         if (Options::PredictPtOcc() && pag->getBaseObject(v) != nullptr)
         {
-            const StmtRelianceRefMap::const_iterator relIt = stmtRelianceRef.find(v);
-            occ = (relIt == stmtRelianceRef.end() ? stmtReliance[v].size() : relIt->second->size()) + 1;
+            const auto relIt = stmtReliance.find(v);
+            occ = (relIt == stmtReliance.end() ? 0 : relIt->second.size()) + 1;
         }
         assert(occ != 0);
         keys.push_back(std::make_pair(v, occ));
@@ -722,7 +698,6 @@ void VersionedFlowSensitive::cluster(void)
 
 Version VersionedFlowSensitive::getVersion(const NodeID l, const NodeID o, const ObjToLocVersionMap &lvm) const
 {
-    // Fast path: maps for equivalent objects are already expanded/shared by pointer.
     const ObjToLocVersionMap::const_iterator oIt = lvm.find(o);
     if (oIt == lvm.end() || !oIt->second)
         return invalidVersion;
@@ -746,16 +721,11 @@ Version VersionedFlowSensitive::getYield(const NodeID l, const NodeID o) const
 
 void VersionedFlowSensitive::setVersion(const NodeID l, const NodeID o, const Version v, ObjToLocVersionMap &lvm)
 {
-    // Canonical object owns storage; equivalent objects alias the same shared map.
-    // This avoids materializing duplicate l->v maps for equivalent object classes.
-    const NodeID canon = canonicalObject(o);
-    LocToVersionMapPtr &canonMapPtr = lvm[canon];
-    if (!canonMapPtr)
-        canonMapPtr = std::make_shared<LocToVersionMap>();
+    LocToVersionMapPtr &objMapPtr = lvm[o];
+    if (!objMapPtr)
+        objMapPtr = std::make_shared<LocToVersionMap>();
 
-    (*canonMapPtr)[l] = v;
-    if (o != canon)
-        lvm[o] = canonMapPtr;
+    (*objMapPtr)[l] = v;
 }
 
 void VersionedFlowSensitive::setConsume(const NodeID l, const NodeID o, const Version v)
@@ -772,9 +742,7 @@ void VersionedFlowSensitive::setYield(const NodeID l, const NodeID o, const Vers
 
 NodeBS &VersionedFlowSensitive::getStmtReliance(const NodeID o, const Version v)
 {
-    const StmtRelianceRefMap::const_iterator relIt = stmtRelianceRef.find(o);
-    Map<Version, NodeBS> *relMap = relIt == stmtRelianceRef.end() ? &stmtReliance[o] : relIt->second;
-    return (*relMap)[v];
+    return stmtReliance[o][v];
 }
 
 unsigned VersionedFlowSensitive::SCC::detectSCCs(VersionedFlowSensitive *vfs,
@@ -837,12 +805,6 @@ unsigned VersionedFlowSensitive::SCC::detectSCCs(VersionedFlowSensitive *vfs,
     }
     if (track)
         profile->visitTicks += vfs->stat->getClk(true) - visitStartTicks;
-
-    // Make sure footprints with the same edges pass ==/hash the same.
-    const double sortStartTicks = track ? vfs->stat->getClk(true) : 0.0;
-    std::sort(footprint.begin(), footprint.end());
-    if (track)
-        profile->sortTicks += vfs->stat->getClk(true) - sortStartTicks;
 
     vfs->recordStmtForObj(object, static_cast<u32_t>(touchedPartOf.size()));
     return currentSCC;

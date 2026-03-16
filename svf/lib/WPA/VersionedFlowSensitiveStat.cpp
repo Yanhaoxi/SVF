@@ -35,7 +35,6 @@ void VersionedFlowSensitiveStat::clearStat()
     _TotalEquivObjs      = 0;
     _NumSingletonClasses = 0;
     _MaxEquivClassSize   = 0;
-    _NumExpandedObjs     = 0;
 }
 
 void VersionedFlowSensitiveStat::performStat()
@@ -101,11 +100,9 @@ void VersionedFlowSensitiveStat::performStat()
     timeStatMap["StoreTime"]          = vfspta->storeTime;
     timeStatMap["UpdateCGTime"]       = vfspta->updateCallGraphTime;
     timeStatMap["PhiTime"]            = vfspta->phiTime;
-    timeStatMap["meldLabelingTime"]   = vfspta->meldLabelingTime;
     timeStatMap["PrelabelingTime"]    = vfspta->prelabelingTime;
     timeStatMap["VersionPropTime"]    = vfspta->versionPropTime;
-    timeStatMap["VDGBuildTime"]      = vfspta->vdgBuildTime;
-    timeStatMap["VDGSimplifyTime"]    = vfspta->vdgSimplifyTime;
+    timeStatMap["VDGBuildTime"]       = vfspta->vdgBuildTime;
 
     PTNumStatMap["TotalPointers"]  = pag->getValueNodeNum();
     PTNumStatMap["TotalObjects"]   = pag->getObjectNodeNum();
@@ -126,7 +123,6 @@ void VersionedFlowSensitiveStat::performStat()
     PTNumStatMap["TotalEquivObjs"]     = _TotalEquivObjs;
     PTNumStatMap["SingletonClasses"]   = _NumSingletonClasses;
     PTNumStatMap["MaxEquivClassSize"]  = _MaxEquivClassSize;
-    PTNumStatMap["ExpandedObjs"]       = _NumExpandedObjs;
 
     PTNumStatMap["CopysNum"]  = numOfCopy;
     PTNumStatMap["StoresNum"] = numOfStore;
@@ -240,25 +236,16 @@ void VersionedFlowSensitiveStat::ptsSizeStat()
 
 void VersionedFlowSensitiveStat::equivalentObjStat(void)
 {
-    // Compute equivalent-object class statistics (versioning footprint equivalence classes).
-    Map<NodeID, u32_t> classSizes;
-    for (const Map<NodeID, NodeID>::value_type &kv : vfspta->equivalentObject)
-    {
-        classSizes[kv.second] += 1;
-        // Count non-canonical objects (those that were expanded)
-        if (kv.first != kv.second)
-        {
-            ++_NumExpandedObjs;
-        }
-    }
+    // Equivalent-object dedup is disabled: each materialized object is its own class.
+    Set<NodeID> objects;
+    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ov : vfspta->consume)
+        objects.insert(ov.first);
+    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ov : vfspta->yield)
+        objects.insert(ov.first);
 
-    _TotalEquivObjs = vfspta->equivalentObject.size();
-    _NumEquivClasses = classSizes.size();
-    _MaxEquivClassSize = 0;
-    _NumSingletonClasses = 0;
-    for (const Map<NodeID, u32_t>::value_type &kv : classSizes)
-    {
-        if (kv.second > _MaxEquivClassSize) _MaxEquivClassSize = kv.second;
-        if (kv.second == 1) ++_NumSingletonClasses;
-    }
+    const u32_t total = static_cast<u32_t>(objects.size());
+    _TotalEquivObjs = total;
+    _NumEquivClasses = total;
+    _NumSingletonClasses = total;
+    _MaxEquivClassSize = total == 0 ? 0 : 1;
 }

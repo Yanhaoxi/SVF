@@ -240,13 +240,7 @@ const Option<std::string> Options::VDGOutput(
 const Option<std::string> Options::VDGPassOrder(
     "vdg-pass-order",
     "VDG simplify pass order letters: S=scc, A=reverse-anchor, M=stable-reach, P=prune, T=trans-redundancy, C=chain",
-    "SMC"
-);
-
-const Option<bool> Options::NewVersionGen(
-    "new-version-gen",
-    "Use graph-simplified version generation in VFS meld labeling (new path by default)",
-    true
+    "SPC"
 );
 
 // Base class of pointer analyses (PointerAnalysis.cpp)

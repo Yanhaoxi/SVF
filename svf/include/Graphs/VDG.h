@@ -156,6 +156,7 @@ public:
         verVec_.reserve(n);
         repVec_.reserve(n);
         subVec_.reserve(n);
+        pendingMergedSubs_.reserve(n);
         superVersions_.reserve(n);
     }
 
@@ -207,6 +208,55 @@ public:
         superVersions_[ver] = true;
         ++nodeNum_;
         return node;
+    }
+
+    /// Ensure dense version nodes [1..maxVer] exist with a single capacity growth.
+    inline void ensureDenseVersionNodes(Version maxVer)
+    {
+        if (maxVer == 0)
+            return;
+
+        const size_t oldSize = verVec_.size();
+        const size_t maxIdx = static_cast<size_t>(maxVer);
+        const size_t targetSize = maxIdx + 1;
+        if (targetSize > oldSize)
+        {
+            verVec_.resize(targetSize, nullptr);
+            repVec_.resize(targetSize, 0);
+            subVec_.resize(targetSize);
+            superVersions_.resize(targetSize, false);
+        }
+
+        const size_t existingEnd =
+            oldSize == 0 ? 0 : ((oldSize - 1 < maxIdx) ? (oldSize - 1) : maxIdx);
+
+        // Backfill possible holes in the pre-existing prefix [1..existingEnd].
+        for (size_t idx = 1; idx <= existingEnd; ++idx)
+        {
+            if (verVec_[idx])
+                continue;
+
+            VDGNode *node = new VDGNode(false, false);
+            verVec_[idx] = node;
+            repVec_[idx] = static_cast<Version>(idx);
+            subVec_[idx].set(static_cast<Version>(idx));
+            superVersions_[idx] = true;
+            ++nodeNum_;
+        }
+
+        // Fill the newly grown tail [oldSize..maxIdx] without existence checks.
+        if (targetSize > oldSize)
+        {
+            for (size_t idx = oldSize == 0 ? 1 : oldSize; idx <= maxIdx; ++idx)
+            {
+                VDGNode *node = new VDGNode(false, false);
+                verVec_[idx] = node;
+                repVec_[idx] = static_cast<Version>(idx);
+                subVec_[idx].set(static_cast<Version>(idx));
+                superVersions_[idx] = true;
+                ++nodeNum_;
+            }
+        }
     }
 
     // --- Rep / sub version mapping ---
@@ -271,11 +321,20 @@ public:
     void reduceByStableSrcReachability();
     void reduceByStableDstReachability();
     void reverseReachMergeByAnchors();
-    void chainContraction();
+    /// Contract chains; if seeds is non-null, start only from those candidate versions.
+    void chainContraction(const NodeVector* seeds = nullptr);
     void transitiveRedundancyElimination();
 
     // --- Lifecycle ---
     void enterSolve();
+    static inline void setSolvePhaseStarted(bool started)
+    {
+        solvePhaseStarted_ = started;
+    }
+    static inline bool isSolvePhaseStarted()
+    {
+        return solvePhaseStarted_;
+    }
 
     // --- Debug / dump ---
     void dump(const std::string& filename);
@@ -297,8 +356,10 @@ private:
     std::vector<VDGNode*> verVec_;          ///< version -> node (or rep node)
     std::vector<Version>  repVec_;          ///< sub -> rep (0 = invalid)
     std::vector<NodeBS>   subVec_;          ///< rep -> {all sub versions}
+    NodeVector            pendingMergedSubs_; ///< newly merged sub reps pending sub->rep sync (solve stage only)
     std::vector<bool>     superVersions_;   ///< liveness bit per version
     NodeVector            updatedNodes_;    ///< pending updated rep versions
+    static bool           solvePhaseStarted_; ///< global gate for solve-stage-only logic
 };
 
 
@@ -464,11 +525,36 @@ public:
 
     inline void markEdgeAdded(NodeID obj, Version srcV)
     {
-        markVersionUpdated(obj, srcV);
+        VDG *graph = getVDG(obj);
+        if (!graph->hasVersion(srcV))
+            return;
+
+        const Version srcRep = graph->getRepVersion(srcV);
+        markVersionUpdated(obj, srcRep);
+        pendingEdgeUpdatesByObj[obj].push_back(srcRep);
+    }
+
+    inline void markEdgeEndpoint(NodeID obj, Version v)
+    {
+        VDG *graph = getVDG(obj);
+        if (!graph->hasVersion(v))
+            return;
+        pendingEdgeUpdatesByObj[obj].push_back(graph->getRepVersion(v));
     }
 
     inline bool hasPendingVDGs() const { return !pendingVDGs.empty(); }
     inline NodeID popPendingVDG() { return pendingVDGs.pop(); }
+    inline bool takePendingEdgeUpdates(NodeID obj, NodeVector &out)
+    {
+        out.clear();
+        auto it = pendingEdgeUpdatesByObj.find(obj);
+        if (it == pendingEdgeUpdatesByObj.end() || it->second.empty())
+            return false;
+
+        out.swap(it->second);
+        pendingEdgeUpdatesByObj.erase(it);
+        return !out.empty();
+    }
 
     inline VDGMapTy&       getAllVDGs()       { return vdgMap; }
     inline const VDGMapTy& getAllVDGs() const { return vdgMap; }
@@ -479,6 +565,7 @@ public:
     {
         vdgMap.clear();
         pendingVDGs.clear();
+        pendingEdgeUpdatesByObj.clear();
     }
 
     inline Version getRepVersion(NodeID obj, Version v) const
@@ -513,6 +600,7 @@ public:
 private:
     VDGMapTy vdgMap;
     FIFOWorkList<NodeID> pendingVDGs;
+    Map<NodeID, NodeVector> pendingEdgeUpdatesByObj;
 };
 
 } // namespace SVF
