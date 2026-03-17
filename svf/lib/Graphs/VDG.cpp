@@ -1122,7 +1122,6 @@ void VDGManager::enterSolveAll()
             entry.second->enterSolve();
     }
     pendingVDGs.clear();
-    pendingEdgeUpdatesByObj.clear();
 }
 
 void VDGManager::dumpStats() const

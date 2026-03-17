@@ -201,7 +201,14 @@ void VersionedFlowSensitive::buildVDG(void)
         double step1SCCVisitTicks = 0.0;
         double step2Ticks = 0.0;
         double step3Ticks = 0.0;
+        u64_t step3UniteAttempts = 0;
+        u64_t step3UniteEffective = 0;
+        u64_t step3AllocatedEquiVersions = 0;
+        u64_t step3MaxAllocatedEquiVersions = 0;
         double step4Ticks = 0.0;
+        u64_t step4FinalVersions = 0;
+        u64_t step4MaxFinalVersions = 0;
+        u64_t step4ReducedVersions = 0;
         double step5Ticks = 0.0;
         double step6Ticks = 0.0;
         double step7BuildVDGTicks = 0.0;
@@ -411,6 +418,15 @@ void VersionedFlowSensitive::buildVDG(void)
                 storeSCC[nSCC] = node;
             }
         }
+        // Current allocated EquiVersion count before any unite() in step3.
+        const u64_t allocatedEquiVersions =
+            static_cast<u64_t>(numSCCs) + static_cast<u64_t>(storesYieldedEquiVersion.size());
+        if (enableMeldProfile)
+        {
+            profileTotals.step3AllocatedEquiVersions += allocatedEquiVersions;
+            if (allocatedEquiVersions > profileTotals.step3MaxAllocatedEquiVersions)
+                profileTotals.step3MaxAllocatedEquiVersions = allocatedEquiVersions;
+        }
 
         if (enableMeldProfile)
             profileTotals.step2Ticks += stat->getClk(true) - step2StartTicks;
@@ -445,7 +461,10 @@ void VersionedFlowSensitive::buildVDG(void)
                 // merge predecessor/destination SCC consume versions.
                 if (mEquiVersion != nEquiVersion && inIt->second.size() == 1)
                 {
-                    (void)VersionManager.unite(mEquiVersion, nEquiVersion);
+                    if (enableMeldProfile)
+                        ++profileTotals.step3UniteAttempts;
+                    if (VersionManager.unite(mEquiVersion, nEquiVersion) && enableMeldProfile)
+                        ++profileTotals.step3UniteEffective;
                 }
             }
         }
@@ -485,6 +504,16 @@ void VersionedFlowSensitive::buildVDG(void)
 
         storesYieldedEquiVersion.clear();
         mvv.clear();
+
+        if (enableMeldProfile)
+        {
+            const u64_t finalVersions = static_cast<u64_t>(curVersion);
+            profileTotals.step4FinalVersions += finalVersions;
+            if (finalVersions > profileTotals.step4MaxFinalVersions)
+                profileTotals.step4MaxFinalVersions = finalVersions;
+            if (allocatedEquiVersions > finalVersions)
+                profileTotals.step4ReducedVersions += (allocatedEquiVersions - finalVersions);
+        }
 
         if (enableMeldProfile)
             profileTotals.step4Ticks += stat->getClk(true) - step4StartTicks;
@@ -722,9 +751,24 @@ void VersionedFlowSensitive::buildVDG(void)
         {
             return step9Sec > 0.0 ? (100.0 * sec / step9Sec) : 0.0;
         };
+        const u64_t processedObjects = profileTotals.processedObjects;
+        const double avgAllocatedEquiVersions = processedObjects > 0
+            ? static_cast<double>(profileTotals.step3AllocatedEquiVersions) / static_cast<double>(processedObjects)
+            : 0.0;
+        const double avgFinalVersions = processedObjects > 0
+            ? static_cast<double>(profileTotals.step4FinalVersions) / static_cast<double>(processedObjects)
+            : 0.0;
+        const double reductionRatio = profileTotals.step3AllocatedEquiVersions > 0
+            ? 100.0 * static_cast<double>(profileTotals.step4ReducedVersions)
+                  / static_cast<double>(profileTotals.step3AllocatedEquiVersions)
+            : 0.0;
+        const double uniteEffectiveRatio = profileTotals.step3UniteAttempts > 0
+            ? 100.0 * static_cast<double>(profileTotals.step3UniteEffective)
+                  / static_cast<double>(profileTotals.step3UniteAttempts)
+            : 0.0;
 
         SVFUtil::outs() << "VFS buildVDG(object pipeline) profiling:\n";
-        SVFUtil::outs() << "  objects processed: " << profileTotals.processedObjects << "\n";
+        SVFUtil::outs() << "  objects processed: " << processedObjects << "\n";
         SVFUtil::outs() << "  wall total (sec): " << totalSec << "\n";
         SVFUtil::outs() << "  VDGBuildTime total (sec): " << vdgBuildTime << "\n";
         SVFUtil::outs() << "  accumulated step total (sec): " << accumulatedSec << "\n";
@@ -738,7 +782,22 @@ void VersionedFlowSensitive::buildVDG(void)
                         << " (" << step1Pct(step1SCCVisitSec) << "% of step1)\n";
         SVFUtil::outs() << "  step2_init: " << step2Sec << " (" << pct(step2Sec) << "%)\n";
         SVFUtil::outs() << "  step3_meld: " << step3Sec << " (" << pct(step3Sec) << "%)\n";
+        SVFUtil::outs() << "    step3_unite_attempts/effective: "
+                        << profileTotals.step3UniteAttempts << "/"
+                        << profileTotals.step3UniteEffective << " ("
+                        << uniteEffectiveRatio << "%)\n";
+        SVFUtil::outs() << "    step3_allocated_versions_sum/avg/max: "
+                        << profileTotals.step3AllocatedEquiVersions << "/"
+                        << avgAllocatedEquiVersions << "/"
+                        << profileTotals.step3MaxAllocatedEquiVersions << "\n";
         SVFUtil::outs() << "  step4_versionize: " << step4Sec << " (" << pct(step4Sec) << "%)\n";
+        SVFUtil::outs() << "    step4_final_versions_sum/avg/max: "
+                        << profileTotals.step4FinalVersions << "/"
+                        << avgFinalVersions << "/"
+                        << profileTotals.step4MaxFinalVersions << "\n";
+        SVFUtil::outs() << "    step4_version_reduced_sum/ratio: "
+                        << profileTotals.step4ReducedVersions << "/"
+                        << reductionRatio << "%\n";
         SVFUtil::outs() << "  step5_reliance: " << step5Sec << " (" << pct(step5Sec) << "%)\n";
         SVFUtil::outs() << "  step6_prepare_labels: " << step6Sec << " (" << pct(step6Sec) << "%)\n";
         SVFUtil::outs() << "  step7_buildvdg: " << step7Sec << " (" << pct(step7Sec) << "%)\n";

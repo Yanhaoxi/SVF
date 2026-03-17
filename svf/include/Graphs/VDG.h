@@ -523,38 +523,8 @@ public:
         pendingVDGs.push(obj);
     }
 
-    inline void markEdgeAdded(NodeID obj, Version srcV)
-    {
-        VDG *graph = getVDG(obj);
-        if (!graph->hasVersion(srcV))
-            return;
-
-        const Version srcRep = graph->getRepVersion(srcV);
-        markVersionUpdated(obj, srcRep);
-        pendingEdgeUpdatesByObj[obj].push_back(srcRep);
-    }
-
-    inline void markEdgeEndpoint(NodeID obj, Version v)
-    {
-        VDG *graph = getVDG(obj);
-        if (!graph->hasVersion(v))
-            return;
-        pendingEdgeUpdatesByObj[obj].push_back(graph->getRepVersion(v));
-    }
-
     inline bool hasPendingVDGs() const { return !pendingVDGs.empty(); }
     inline NodeID popPendingVDG() { return pendingVDGs.pop(); }
-    inline bool takePendingEdgeUpdates(NodeID obj, NodeVector &out)
-    {
-        out.clear();
-        auto it = pendingEdgeUpdatesByObj.find(obj);
-        if (it == pendingEdgeUpdatesByObj.end() || it->second.empty())
-            return false;
-
-        out.swap(it->second);
-        pendingEdgeUpdatesByObj.erase(it);
-        return !out.empty();
-    }
 
     inline VDGMapTy&       getAllVDGs()       { return vdgMap; }
     inline const VDGMapTy& getAllVDGs() const { return vdgMap; }
@@ -565,7 +535,6 @@ public:
     {
         vdgMap.clear();
         pendingVDGs.clear();
-        pendingEdgeUpdatesByObj.clear();
     }
 
     inline Version getRepVersion(NodeID obj, Version v) const
@@ -600,7 +569,6 @@ public:
 private:
     VDGMapTy vdgMap;
     FIFOWorkList<NodeID> pendingVDGs;
-    Map<NodeID, NodeVector> pendingEdgeUpdatesByObj;
 };
 
 } // namespace SVF

@@ -326,15 +326,6 @@ void VersionedFlowSensitive::propagateAllVersions()
         const NodeID obj = vdgManager.popPendingVDG();
         VDG *graph = vdgManager.getVDG(obj);
 
-        NodeVector edgeSeeds;
-        if (vdgManager.takePendingEdgeUpdates(obj, edgeSeeds) && edgeSeeds.size() > 1)
-        {
-            std::sort(edgeSeeds.begin(), edgeSeeds.end());
-            edgeSeeds.erase(std::unique(edgeSeeds.begin(), edgeSeeds.end()), edgeSeeds.end());
-        }
-        if (!edgeSeeds.empty())
-            graph->chainContraction(&edgeSeeds);
-
         assert(graph->hasPendingUpdates() && "VFS::propagateAllVersions: pending VDG should have updates!");
 
         // Define propagation callback: union pts from srcV to dstV
@@ -425,9 +416,8 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
                 if (!graph->hasVersion(srcY) || !graph->hasVersion(dstC)) continue;
                 // Use addEdge with version (auto-converts to rep)
                 if(graph->addEdge(srcY, dstC, false)){
-                    // Mark source as updated for batch propagation and record both endpoints.
-                    vdgManager.markEdgeAdded(o, srcY);
-                    vdgManager.markEdgeEndpoint(o, dstC);
+                    // Mark source as updated for batch propagation.
+                    vdgManager.markVersionUpdated(o, srcY);
                 }
             }
         }
@@ -591,8 +581,7 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
             {
                 if (graph->addEdge(c, y, false))
                 {
-                    vdgManager.markEdgeAdded(o, c);
-                    vdgManager.markEdgeEndpoint(o, y);
+                    vdgManager.markVersionUpdated(o, c);
                 }
             }
         }
