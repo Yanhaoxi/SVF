@@ -51,7 +51,6 @@ void VersionedFlowSensitive::initialize()
     stat = new VersionedFlowSensitiveStat(this);
 
     vPtD = getVersionedPTDataTy();
-    objStmtCount.clear();
     buildIsStoreLoadMaps();
     buildDeltaMaps();
     stmtPtsCache.clear();
@@ -71,7 +70,6 @@ void VersionedFlowSensitive::initialize()
     }
     if (Options::VDGStat()){
         vdgManager.dumpStats();
-        dumpOriginalData();
     }
 
     // Switch all VDGs to solve stage once build/simplify/materialization is done.
@@ -93,42 +91,6 @@ void VersionedFlowSensitive::finalize()
     }
     if (Options::VDGStat())
         vdgManager.dumpStats();
-}
-
-void VersionedFlowSensitive::recordStmtForObj(NodeID o, u32_t countNum)
-{
-    if (!Options::VDGStat())
-        return;
-
-    objStmtCount[o] = countNum;
-}
-
-void VersionedFlowSensitive::dumpOriginalData(void) const
-{
-    u64_t stmtTotal = 0;
-    u32_t stmtMax = 0;
-    NodeID stmtMaxObj = 0;
-    const u64_t stmtObjCount = objStmtCount.size();
-
-    SVFUtil::outs() << "objstmtcount (obj:stmtnum)\n";
-    for (const ObjCountMap::value_type &ov : objStmtCount)
-    {
-        const NodeID o = ov.first;
-        const u32_t value = ov.second;
-        stmtTotal += value;
-        if (value > stmtMax)
-        {
-            stmtMax = value;
-            stmtMaxObj = o;
-        }
-    }
-
-    const double stmtAvg = stmtObjCount == 0
-        ? 0.0
-        : static_cast<double>(stmtTotal) / static_cast<double>(stmtObjCount);
-    SVFUtil::outs() << "objstmtcount summary total:" << stmtTotal
-                    << " max:" << stmtMax << "@" << stmtMaxObj
-                    << " avg:" << stmtAvg << "\n";
 }
 
 bool VersionedFlowSensitive::meld(MeldVersion &mv1, const MeldVersion &mv2)
@@ -253,6 +215,9 @@ void VersionedFlowSensitive::removeAllIndirectSVFGEdges(void)
 
 void VersionedFlowSensitive::computeBot(void)
 {
+    // computeBot is temporarily disabled.
+    // Original logic intentionally commented out.
+#if 0
     // Slice of the standard solveConstraints loop:
     // - Seed worklist with address nodes only.
     // - Keep SCC/updateCallGraph outer fixpoint.
@@ -285,6 +250,7 @@ void VersionedFlowSensitive::computeBot(void)
         }
     }
     while (updateCallGraph(getIndirectCallsites()));
+#endif
 }
 
 void VersionedFlowSensitive::solveWorklist()
@@ -732,141 +698,4 @@ void VersionedFlowSensitive::setYield(const NodeID l, const NodeID o, const Vers
 NodeBS &VersionedFlowSensitive::getStmtReliance(const NodeID o, const Version v)
 {
     return stmtReliance[o][v];
-}
-
-unsigned VersionedFlowSensitive::SCC::detectSCCs(VersionedFlowSensitive *vfs,
-        const SVFG *svfg, const NodeID object,
-        const std::vector<NodeID> &startingNodes,
-        std::vector<int> &partOf,
-        std::vector<const IndirectSVFGEdge *> &footprint,
-        DetectProfile *profile)
-{
-    const bool track = profile != nullptr;
-    const double initStartTicks = track ? vfs->stat->getClk(true) : 0.0;
-
-    const size_t totalNodes = svfg->getTotalNodeNum();
-    static thread_local std::vector<NodeData> nodeData;
-    static thread_local std::vector<NodeID> touchedPartOf;
-    static thread_local std::vector<NodeID> touchedNodeData;
-
-    if (partOf.size() != totalNodes)
-    {
-        partOf.assign(totalNodes, -1);
-        touchedPartOf.clear();
-    }
-    else
-    {
-        for (const NodeID id : touchedPartOf)
-            partOf[id] = -1;
-        touchedPartOf.clear();
-    }
-
-    footprint.clear();
-
-    if (nodeData.size() != totalNodes)
-    {
-        nodeData.assign(totalNodes, { -1, -1, false });
-        touchedNodeData.clear();
-    }
-    else
-    {
-        for (const NodeID id : touchedNodeData)
-            nodeData[id] = { -1, -1, false };
-        touchedNodeData.clear();
-    }
-
-    std::stack<const SVFGNode *> stack;
-
-    if (track)
-        profile->initTicks += vfs->stat->getClk(true) - initStartTicks;
-
-    int index = 0;
-    int currentSCC = 0;
-
-    const double visitStartTicks = track ? vfs->stat->getClk(true) : 0.0;
-    for (const NodeID startId : startingNodes)
-    {
-        if (nodeData[startId].index == -1)
-        {
-            const SVFGNode *startNode = svfg->getSVFGNode(startId);
-            visit(vfs, object, partOf, footprint, nodeData, touchedPartOf, touchedNodeData, stack, index, currentSCC, startNode);
-        }
-    }
-    if (track)
-        profile->visitTicks += vfs->stat->getClk(true) - visitStartTicks;
-
-    vfs->recordStmtForObj(object, static_cast<u32_t>(touchedPartOf.size()));
-    return currentSCC;
-}
-
-void VersionedFlowSensitive::SCC::visit(VersionedFlowSensitive *vfs,
-                                        const NodeID object,
-                                        std::vector<int> &partOf,
-                                        std::vector<const IndirectSVFGEdge *> &footprint,
-                                        std::vector<NodeData> &nodeData,
-                                        std::vector<NodeID> &touchedPartOf,
-                                        std::vector<NodeID> &touchedNodeData,
-                                        std::stack<const SVFGNode *> &stack,
-                                        int &index,
-                                        int &currentSCC,
-                                        const SVFGNode *v)
-{
-    const NodeID vId = v->getId();
-
-    nodeData[vId].index = index;
-    nodeData[vId].lowlink = index;
-    ++index;
-    touchedNodeData.push_back(vId);
-
-    stack.push(v);
-    nodeData[vId].onStack = true;
-
-    for (const SVFGEdge *e : v->getOutEdges())
-    {
-        const IndirectSVFGEdge *ie = SVFUtil::dyn_cast<IndirectSVFGEdge>(e);
-        if (!ie) continue;
-
-        const SVFGNode *w = ie->getDstNode();
-        const NodeID wId = w->getId();
-
-        // If object is not part of the edge, there is no edge from v to w.
-        if (!ie->getPointsTo().test(object)) continue;
-
-        // Even if we don't count edges to stores and deltas for SCCs' sake, they
-        // are relevant to the footprint as a propagation still occurs over such edges.
-        footprint.push_back(ie);
-
-        // Ignore edges to delta nodes because they are prelabeled so cannot
-        // be part of the SCC v is in (already in nodesTodo from the prelabeled set).
-        // Similarly, store nodes.
-        if (vfs->delta(wId) || vfs->isStore(wId)) continue;
-
-        if (nodeData[wId].index == -1)
-        {
-            visit(vfs, object, partOf, footprint, nodeData, touchedPartOf, touchedNodeData, stack, index, currentSCC, w);
-            nodeData[vId].lowlink = std::min(nodeData[vId].lowlink, nodeData[wId].lowlink);
-        }
-        else if (nodeData[wId].onStack)
-        {
-            nodeData[vId].lowlink = std::min(nodeData[vId].lowlink, nodeData[wId].index);
-        }
-    }
-
-    if (nodeData[vId].lowlink == nodeData[vId].index)
-    {
-        const SVFGNode *w = nullptr;
-        do
-        {
-            w = stack.top();
-            stack.pop();
-            const NodeID wId = w->getId();
-            nodeData[wId].onStack = false;
-            partOf[wId] = currentSCC;
-            touchedPartOf.push_back(wId);
-        }
-        while (w != v);
-
-        // For the next SCC.
-        ++currentSCC;
-    }
 }

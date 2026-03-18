@@ -37,7 +37,6 @@ class VersionedFlowSensitive : public FlowSensitive
 
 private:
     typedef CoreBitVector MeldVersion;
-    typedef unsigned EquiVersion;
 
 public:
     /// Per-object location-version map: l -> v.
@@ -168,9 +167,6 @@ public:
     /// Dumps maps consume and yield.
     void dumpLocVersionMaps(void) const;
 
-    /// Dumps per-object stmt count summary collected during SCC detection.
-    void dumpOriginalData(void) const;
-
     void solveAndwritePtsToFile(const std::string& filename) override;
 
     void writeVersionedAnalysisResultToFile(const std::string& filename);
@@ -200,8 +196,6 @@ private:
 
     /// Fills in deltaMap and deltaSourceMap for the SVFG.
     virtual void buildDeltaMaps(void);
-
-    void recordStmtForObj(NodeID o, u32_t countNum);
 
     /// Returns true if l is a delta node, i.e., may get a new incoming indirect
     /// edge due to on-the-fly callgraph construction.
@@ -297,9 +291,6 @@ private:
     /// isLoadMap[l] means SVFG node l is a load node.
     std::vector<bool> isLoadMap;
 
-    typedef Map<NodeID, u32_t> ObjCountMap;
-    ObjCountMap objStmtCount;
-
     /// Additional statistics.
     //@{
     u32_t numPrelabeledNodes;  ///< Number of prelabeled nodes.
@@ -310,115 +301,8 @@ private:
     double vdgBuildTime;     ///< Time to execute the full buildVDG pipeline.
     //@}
 
-    class VersionDSU
-    {
-    public:
-        VersionDSU() = default;
-        explicit VersionDSU(EquiVersion n)
-        {
-            reset(n);
-        }
-
-        void reset(unsigned n)
-        {
-            parent.resize(n);
-            rank.assign(n, 0);
-            for (unsigned i = 0; i < n; ++i)
-                parent[i] = i;
-        }
-
-        EquiVersion addNode()
-        {
-            const EquiVersion id = parent.size();
-            parent.push_back(id);
-            rank.push_back(0);
-            return id;
-        }
-
-        EquiVersion find(EquiVersion x)
-        {
-            while (parent[x] != x)
-            {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            return x;
-        }
-
-        bool unite(EquiVersion a, EquiVersion b)
-        {
-            a = find(a);
-            b = find(b);
-            if (a == b) return false;
-
-            if (rank[a] < rank[b])
-            {
-                const EquiVersion tmp = a;
-                a = b;
-                b = tmp;
-            }
-            parent[b] = a;
-            if (rank[a] == rank[b]) ++rank[a];
-            return true;
-        }
-
-    private:
-        std::vector<EquiVersion> parent;
-        std::vector<u8_t> rank;
-    };
-
     static VersionedFlowSensitive *vfspta;
 
-    class SCC
-    {
-    private:
-        typedef struct NodeData
-        {
-            int index;
-            int lowlink;
-            bool onStack;
-        } NodeData;
-
-    public:
-        struct DetectProfile
-        {
-            double initTicks = 0.0;
-            double visitTicks = 0.0;
-            double sortTicks = 0.0;
-        };
-
-        /// Determines the strongly connected components of svfg following only
-        /// edges labelled with object. partOf[n] = scc means nodes n is part of
-        /// SCC scc. startingNodes contains the nodes to begin the search from.
-        /// After completion, footprint will contain all edges which object
-        /// appears on (as reached through the algorithm described above) sorted.
-        ///
-        /// This is not a general SCC detection but specifically for versioning,
-        /// so edges to delta nodes are skipped as they are prelabelled. Edges
-        /// to stores are also skipped to as they yield a new version (they
-        /// cannot be part of an SCC containing more than themselves).
-        /// Skipped edges still form part of the footprint.
-        static unsigned detectSCCs(VersionedFlowSensitive *vfs,
-                                   const SVFG *svfg, const NodeID object,
-                                   const std::vector<NodeID> &startingNodes,
-                                   std::vector<int> &partOf,
-                                   std::vector<const IndirectSVFGEdge *> &footprint,
-                                   DetectProfile *profile = nullptr);
-
-    private:
-        /// Called by detectSCCs then called recursively.
-        static void visit(VersionedFlowSensitive *vfs,
-                          const NodeID object,
-                          std::vector<int> &partOf,
-                          std::vector<const IndirectSVFGEdge *> &footprint,
-                          std::vector<NodeData> &nodeData,
-                          std::vector<NodeID> &touchedPartOf,
-                          std::vector<NodeID> &touchedNodeData,
-                          std::stack<const SVFGNode *> &stack,
-                          int &index,
-                          int &currentSCC,
-                          const SVFGNode *v);
-    };
 };
 
 } // End namespace SVF

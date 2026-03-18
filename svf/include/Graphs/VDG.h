@@ -183,6 +183,29 @@ public:
         return v < capacity() && repVec_[v] != 0;
     }
 
+    /// Ensure internal arrays can index up to maxVer (inclusive).
+    /// Uses geometric growth to avoid frequent reallocations in build-heavy paths.
+    inline void ensureVersionCapacity(Version maxVer)
+    {
+        if (maxVer == 0)
+            return;
+
+        const size_t maxIdx = static_cast<size_t>(maxVer);
+        if (maxIdx < verVec_.size())
+            return;
+
+        size_t newSize = verVec_.size();
+        if (newSize < 2)
+            newSize = 2;
+        while (newSize <= maxIdx)
+            newSize <<= 1;
+
+        verVec_.resize(newSize, nullptr);
+        repVec_.resize(newSize, 0);
+        subVec_.resize(newSize);
+        superVersions_.resize(newSize, false);
+    }
+
     VDGNode* getOrAddNode(Version ver, bool loadConsume = false, bool storeYield = false)
     {
         if (ver < verVec_.size() && verVec_[ver])
@@ -193,13 +216,7 @@ public:
             return n;
         }
 
-        if (ver >= verVec_.size())
-        {
-            verVec_.resize(ver + 1, nullptr);
-            repVec_.resize(ver + 1, 0);
-            subVec_.resize(ver + 1);
-            superVersions_.resize(ver + 1, false);
-        }
+        ensureVersionCapacity(ver);
 
         VDGNode* node = new VDGNode(loadConsume, storeYield);
         verVec_[ver] = node;
@@ -282,6 +299,11 @@ public:
     inline const NodeBS& getStmtReliance(Version v) const
     {
         return getNode(v)->getStmtRelianceSet();
+    }
+
+    inline void bindStmtRelianceStmt(Version v, NodeID stmt)
+    {
+        getNode(v)->stmtReliance_.set(stmt);
     }
 
     inline void bindStmtReliance(Version v, const NodeBS& stmts)
