@@ -41,6 +41,11 @@ namespace
         graph.reduceByStableDstReachability();
     }
 
+    void vdgSimplifyStoreVirtualBFSMerge(VDG &graph)
+    {
+        graph.bfsMergeByStoreYieldAndVirtualIn();
+    }
+
     void vdgSimplifyPrune(VDG &graph)
     {
         graph.pruneUnreachableToLoadConsume();
@@ -69,6 +74,9 @@ namespace
             return true;
         case 'M':
             registerVDGSimplifyPass(passes, vdgSimplifyStableReachability);
+            return true;
+        case 'B':
+            registerVDGSimplifyPass(passes, vdgSimplifyStoreVirtualBFSMerge);
             return true;
         case 'P':
             registerVDGSimplifyPass(passes, vdgSimplifyPrune);
@@ -109,10 +117,61 @@ namespace
         SVFUtil::errs() << "VFS: empty VDG pass pipeline, fallback to -vdg-pass-order="
                         << fallback << "\n";
     }
+
+    // Object-local version DSU for equivalence merges.
+    // parent[v] == 0 means v is a root.
+    struct VersionDSU
+    {
+        std::vector<Version> parent;
+        std::vector<u32_t> rank;
+
+        void reset(const Version maxVersion)
+        {
+            parent.assign(static_cast<size_t>(maxVersion) + 1, 0);
+            rank.assign(static_cast<size_t>(maxVersion) + 1, 0);
+        }
+
+        inline bool valid(const Version v) const
+        {
+            return v != VersionedFlowSensitive::invalidVersion && static_cast<size_t>(v) < parent.size();
+        }
+
+        Version find(const Version v)
+        {
+            if (!valid(v))
+                return VersionedFlowSensitive::invalidVersion;
+
+            const Version p = parent[v];
+            if (p == 0)
+                return v;
+
+            parent[v] = find(p);
+            return parent[v];
+        }
+
+        bool unite(const Version lhs, const Version rhs)
+        {
+            Version rl = find(lhs);
+            Version rr = find(rhs);
+            if (rl == VersionedFlowSensitive::invalidVersion
+                || rr == VersionedFlowSensitive::invalidVersion
+                || rl == rr)
+                return false;
+
+            if (rank[rl] < rank[rr])
+                std::swap(rl, rr);
+
+            parent[rr] = rl;
+            if (rank[rl] == rank[rr])
+                ++rank[rl];
+            return true;
+        }
+    };
 }
 
 void VersionedFlowSensitive::prelabel(void)
 {
+    // 由 Load 节点出发
     double start = stat->getClk(true);
     objStartingNodes.clear();
     prelabeledObjects.clear();
@@ -121,48 +180,18 @@ void VersionedFlowSensitive::prelabel(void)
         NodeID l = it->first;
         const SVFGNode *ln = it->second;
 
-        if (const StoreSVFGNode *stn = SVFUtil::dyn_cast<StoreSVFGNode>(ln))
+        if (const LoadSVFGNode *ldn = SVFUtil::dyn_cast<LoadSVFGNode>(ln))
         {
-            // l: *p = q.
-            // If p points to o (Andersen's), l yields a new version for o.
-            NodeID p = stn->getPAGDstNodeID();
-            for (NodeID o : ander->getPts(p))
+            // l: p = *q.
+            // If q points to o (Andersen's), l yields a new version for o.
+            NodeID q = ldn->getPAGSrcNodeID();
+            for (NodeID o : ander->getPts(q))
             {
                 prelabeledObjects.insert(o);
                 objStartingNodes[o].push_back(l);
             }
-
-            if (ander->getPts(p).count() != 0) ++numPrelabeledNodes;
-        }
-        else if (delta(l))
-        {
-            // The outgoing edges are not only what will later be propagated. SVFGOPT may
-            // move around nodes such that there can be an MRSVFGNode with no incoming or
-            // outgoing edges which will be added at runtime. In essence, we can no
-            // longer rely on the outgoing edges of a delta node when SVFGOPT is enabled.
-            const MRSVFGNode *mr = SVFUtil::dyn_cast<MRSVFGNode>(ln);
-            if (mr != nullptr)
-            {
-                for (const NodeID o : mr->getPointsTo())
-                {
-                    prelabeledObjects.insert(o);
-                    objStartingNodes[o].push_back(l);
-                }
-
-                if (mr->getPointsTo().count() != 0) ++numPrelabeledNodes;
-            }
         }
     }
-
-    for (Map<NodeID, NodeVector>::value_type &ov : objStartingNodes)
-    {
-        NodeVector &starts = ov.second;
-        if (starts.empty())
-            continue;
-        std::sort(starts.begin(), starts.end());
-        starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
-    }
-
     double end = stat->getClk(true);
     prelabelingTime = (end - start) / TIMEINTERVAL;
 }
@@ -180,38 +209,24 @@ void VersionedFlowSensitive::buildVDG(void)
     buildVDGSimplifyPassPipeline(passes, Options::VDGPassOrder());
     const bool enableProfile = Options::VDGStat();
 
-    struct BuildVDGProfileTotals
+    struct BuildVDGHotProfile
     {
         u64_t objects = 0;
-        u64_t emptyStartObjects = 0;
-        u64_t step1WavePops = 0;
-        u64_t step1OutEdges = 0;
-        u64_t step1MatchedIndirectEdges = 0;
-        u64_t step1DeltaSourceHits = 0;
-        u64_t step1DeltaCandidates = 0;
-        u64_t step1DeltaAccepted = 0;
-        u64_t plannedSolidEdges = 0;
-        u64_t plannedVirtualEdges = 0;
-        u64_t materializeNodeCalls = 0;
-        u64_t materializeEdgeCalls = 0;
-        u64_t shrinkNodeCalls = 0;
-        u64_t shrinkEdgeCalls = 0;
-        double perObjTicks = 0.0;
         double step1Ticks = 0.0;
-        double step2NodeTicks = 0.0;
-        double step2EdgeTicks = 0.0;
-        double step2SimplifyTicks = 0.0;
-        double step3PrepTicks = 0.0;
-        double step3RebuildTicks = 0.0;
-        double step3PublishTicks = 0.0;
+        double step2Ticks = 0.0;
+        double step3Ticks = 0.0;
+        double step4Ticks = 0.0;
+        u64_t compressObjects = 0;
+        u64_t preDenseVersionTotal = 0;
+        u64_t preDenseVersionMax = 0;
+        u64_t denseVersionTotal = 0;
+        u64_t denseVersionMax = 0;
     } profile;
 
-    std::vector<double> simplifyPassTicks(passes.size(), 0.0);
-    std::vector<u64_t> simplifyPassRuns(passes.size(), 0);
-    std::vector<u64_t> simplifyPassNodeSum(passes.size(), 0);
-    std::vector<u64_t> simplifyPassNodeMax(passes.size(), 0);
-    std::vector<u64_t> simplifyPassEdgeSum(passes.size(), 0);
-    std::vector<u64_t> simplifyPassEdgeMax(passes.size(), 0);
+    std::vector<u64_t> passRuns(passes.size(), 0);
+    std::vector<u64_t> passVDGNodeTotal(passes.size(), 0);
+    std::vector<u64_t> passVDGNodeMax(passes.size(), 0);
+    const size_t totalSVFGNodes = svfg->getTotalNodeNum();
 
     // Cache possible delta destinations per delta-source statement (srcId).
     // This is object-independent and should be built once per srcId.
@@ -283,274 +298,366 @@ void VersionedFlowSensitive::buildVDG(void)
         return inserted.first->second;
     };
 
-    const size_t totalSVFGNodes = svfg->getTotalNodeNum();
-    std::vector<bool> visited(totalSVFGNodes, false);
-    NodeVector touchedVisited;
-    touchedVisited.reserve(totalSVFGNodes / 6 + 1);
-
-    auto resetVisitedMarks = [&visited, &touchedVisited]()
+    Map<NodeID, NodeVector> deltaSrcCacheByDst;
+    for (SVFG::const_iterator it = svfg->begin(), eit = svfg->end(); it != eit; ++it)
     {
-        for (const NodeID n : touchedVisited)
-            visited[n] = false;
-        touchedVisited.clear();
+        const NodeID srcId = it->first;
+        if (!deltaSource(srcId))
+            continue;
+
+        const NodeVector &deltaDsts = getDeltaDstsForSrc(srcId);
+        for (const NodeID dstId : deltaDsts)
+            deltaSrcCacheByDst[dstId].push_back(srcId);
+    }
+    for (Map<NodeID, NodeVector>::value_type &entry : deltaSrcCacheByDst)
+    {
+        NodeVector &srcs = entry.second;
+        if (srcs.empty())
+            continue;
+        std::sort(srcs.begin(), srcs.end());
+        srcs.erase(std::unique(srcs.begin(), srcs.end()), srcs.end());
+    }
+    // Release src->dst cache immediately after reverse index is built.
+    Map<NodeID, NodeVector>().swap(deltaDstCache);
+
+    std::vector<bool> discovered(totalSVFGNodes, false);
+    NodeVector touchedDiscovered;
+    touchedDiscovered.reserve(totalSVFGNodes / 6 + 1);
+
+    auto resetDiscoveredMarks = [&discovered, &touchedDiscovered]()
+    {
+        for (const NodeID n : touchedDiscovered)
+            discovered[n] = false;
+        touchedDiscovered.clear();
     };
 
-    auto markVisited = [&visited, &touchedVisited](const NodeID n) -> bool
+    auto markDiscovered = [&discovered, &touchedDiscovered](const NodeID n) -> bool
     {
-        if (n >= visited.size() || visited[n])
+        if (n >= discovered.size() || discovered[n])
             return false;
-        visited[n] = true;
-        touchedVisited.push_back(n);
+        discovered[n] = true;
+        touchedDiscovered.push_back(n);
         return true;
     };
 
+    // Object-local dense version maps (stmtId -> version), reused across objects.
+    std::vector<Version> consumeVersionByLoc(totalSVFGNodes, invalidVersion);
+    std::vector<Version> yieldVersionByLoc(totalSVFGNodes, invalidVersion);
+    NodeVector touchedConsumeLocs;
+    NodeVector touchedYieldLocs;
+    touchedConsumeLocs.reserve(totalSVFGNodes / 6 + 1);
+    touchedYieldLocs.reserve(totalSVFGNodes / 12 + 1);
+
+    auto resetObjectDenseVersionMaps = [
+                                         &consumeVersionByLoc,
+                                         &yieldVersionByLoc,
+                                         &touchedConsumeLocs,
+                                         &touchedYieldLocs
+                                        ]()
+    {
+        for (const NodeID stmtId : touchedConsumeLocs)
+            consumeVersionByLoc[stmtId] = invalidVersion;
+        touchedConsumeLocs.clear();
+
+        for (const NodeID stmtId : touchedYieldLocs)
+            yieldVersionByLoc[stmtId] = invalidVersion;
+        touchedYieldLocs.clear();
+    };
+
+    const NodeVector emptyStartingNodes;
     for (const NodeID o : prelabeledObjects)
     {
-        const double objStartTicks = enableProfile ? stat->getClk(true) : 0.0;
         if (enableProfile)
             ++profile.objects;
+        resetDiscoveredMarks();
+        resetObjectDenseVersionMaps();
 
-        resetVisitedMarks();
-
-        static const NodeVector emptyStartingNodes;
         const Map<NodeID, NodeVector>::const_iterator startsIt = objStartingNodes.find(o);
         const NodeVector &osStartingNodes
             = startsIt == objStartingNodes.end() ? emptyStartingNodes : startsIt->second;
-        if (enableProfile && osStartingNodes.empty())
-            ++profile.emptyStartObjects;
 
         VDG *graph = vdgManager.getOrCreateVDG(o);
 
-        LocToVersionMap objectConsume;
-        LocToVersionMap objectYield;
-        std::vector<std::pair<Version, NodeID>> osStmtReliance;
-        std::vector<std::pair<Version, Version>> solidEdges;
-        std::vector<std::pair<Version, Version>> virtualEdges;
+        std::vector<std::pair<Version, NodeID>> osStmtReliance; // 绑定在该 version 上的 load 语句
+        std::vector<std::pair<Version, Version>> Edges; // solid cflow 依赖边
+        std::vector<std::pair<Version, Version>> VEdges; // virtual 依赖边
+        std::vector<std::pair<Version, Version>> Equiv; // 等价版本
 
         Version nextVersion = invalidVersion;
 
-        auto addPlannedEdge = [&solidEdges, &virtualEdges](Version src, Version dst, bool isVirtual)
+        // 更新 consume 版本 记录 load 语句依赖
+        auto getOrCreateConsumeVersion = [
+                                           this,
+                                           &consumeVersionByLoc,
+                                           &touchedConsumeLocs,
+                                           &osStmtReliance,
+                                           &nextVersion
+                                          ](const NodeID stmtId) -> Version
         {
-            if (src == invalidVersion || dst == invalidVersion || src == dst)
-                return;
-            if (isVirtual)
-                virtualEdges.emplace_back(src, dst);
-            else
-                solidEdges.emplace_back(src, dst);
-        };
+            assert(static_cast<size_t>(stmtId) < consumeVersionByLoc.size() && "stmtId out of dense consume map range");
+            Version &slot = consumeVersionByLoc[stmtId];
+            if (slot != invalidVersion)
+                return slot;
 
-        auto getOrCreateConsumeVersion = [this, &objectConsume, &osStmtReliance, &nextVersion](const NodeID stmtId) -> Version
-        {
-            const auto found = objectConsume.find(stmtId);
-            if (found != objectConsume.end())
-                return found->second;
-
-            const Version v = ++nextVersion;
-            objectConsume[stmtId] = v;
+            slot = ++nextVersion;
+            touchedConsumeLocs.push_back(stmtId);
             if (isLoad(stmtId))
-                osStmtReliance.emplace_back(v, stmtId);
-            return v;
+                osStmtReliance.emplace_back(slot, stmtId);
+            return slot;
         };
 
-        auto getOrCreateStoreYieldVersion = [this,
-                                             &objectYield,
-                                             &getOrCreateConsumeVersion,
-                                             &nextVersion,
-                                             &addPlannedEdge](const NodeID storeId) -> Version
+        // 更新 yield 版本
+        auto getOrCreateStoreYieldVersion = [
+                                             &yieldVersionByLoc,
+                                             &touchedYieldLocs,
+                                             &nextVersion
+                                            ](const NodeID storeId) -> Version
         {
-            const auto found = objectYield.find(storeId);
-            if (found != objectYield.end())
-                return found->second;
+            assert(static_cast<size_t>(storeId) < yieldVersionByLoc.size() && "storeId out of dense yield map range");
+            Version &slot = yieldVersionByLoc[storeId];
+            if (slot != invalidVersion)
+                return slot;
 
-            const Version consumeV = getOrCreateConsumeVersion(storeId);
-            const Version yieldV = ++nextVersion;
-            objectYield[storeId] = yieldV;
-
-            const StoreSVFGNode *store = SVFUtil::dyn_cast<StoreSVFGNode>(svfg->getSVFGNode(storeId));
-            if (store != nullptr)
-            {
-                // const PointsTo &dstVPts = getPts(store->getPAGDstNodeID());
-                // const size_t dstCount = dstVPts.count();
-                // const bool addSolidStoreEdge =
-                //     dstCount >= 2 || (dstCount == 1 && *dstVPts.begin() != o);
-
-                // addPlannedEdge(consumeV, yieldV, !addSolidStoreEdge);
-                addPlannedEdge(consumeV, yieldV, true);
-                // if (!addSolidStoreEdge)
-                //     pendingStoreObjsByLoc[storeId].push_back(o);
-            }
-
-            return yieldV;
+            slot = ++nextVersion;
+            touchedYieldLocs.push_back(storeId);
+            return slot;
         };
 
         // --- step 1: traverse object footprint and collect versions/edges only ---
         const double step1StartTicks = enableProfile ? stat->getClk(true) : 0.0;
         std::queue<const SVFGNode *> waveQueue;
-        // 预处理起始节点
+
+        // 预处理起始 Load 节点
         for (const NodeID startId : osStartingNodes)
         {
             const SVFGNode *startNode = svfg->getSVFGNode(startId);
             if (startNode == nullptr)
                 continue;
-
+            assert(SVFUtil::isa<LoadSVFGNode>(startNode) && "starting nodes should be loads");
             (void)getOrCreateConsumeVersion(startId);
-            if (isStore(startId))
-                (void)getOrCreateStoreYieldVersion(startId);
-
-            if (markVisited(startId))
+            if (markDiscovered(startId))
                 waveQueue.push(startNode);
         }
-        // 沿着 SVFG 收集信息
+
+        // Reverse walk from load anchors along incoming indirect edges.
+        // For each matched edge src --o--> dst, add src(version)->dst(consume-version).
+        // Meanwhile, gather equivalence among versions when possible (single non-delta/store pred).
         while (!waveQueue.empty())
         {
-            const SVFGNode *src = waveQueue.front();
+            const SVFGNode *dst = waveQueue.front();
             waveQueue.pop();
-            if (enableProfile)
-                ++profile.step1WavePops;
 
-            const NodeID srcId = src->getId();
-            const Version srcConsumeV = getOrCreateConsumeVersion(srcId);
-            const Version srcV = isStore(srcId) ? getOrCreateStoreYieldVersion(srcId) : srcConsumeV;
+            const NodeID dstId = dst->getId();
+            const Version dstConsumeV = getOrCreateConsumeVersion(dstId);
+            const bool dstIsDelta = delta(dstId);
 
-            for (const SVFGEdge *edge : src->getOutEdges())
+            unsigned inedge = 0;
+            Version singlePredV = invalidVersion;
+            for (const SVFGEdge *edge : dst->getInEdges())
             {
-                if (enableProfile)
-                    ++profile.step1OutEdges;
                 const IndirectSVFGEdge *ie = SVFUtil::dyn_cast<IndirectSVFGEdge>(edge);
                 if (!ie)
                     continue;
                 if (!ie->getPointsTo().test(o))
                     continue;
-                if (enableProfile)
-                    ++profile.step1MatchedIndirectEdges;
+                inedge++;
 
-                const SVFGNode *dst = ie->getDstNode();
-                const NodeID dstId = dst->getId();
-                const Version dstConsumeV = getOrCreateConsumeVersion(dstId);
-                if (isStore(dstId))
-                    (void)getOrCreateStoreYieldVersion(dstId);
+                const SVFGNode *src = ie->getSrcNode();
+                const NodeID srcId = src->getId();
+                const Version srcConsumeV = getOrCreateConsumeVersion(srcId);
+                const Version srcV = isStore(srcId) ? getOrCreateStoreYieldVersion(srcId) : srcConsumeV;
+                if (dstIsDelta)
+                {
+                    Edges.emplace_back(srcV, dstConsumeV);
+                }
+                else if (inedge == 1)
+                {
+                    // For non-delta dst, defer emitting the first edge until we know
+                    // whether this is truly single-predecessor (only Equiv needed).
+                    singlePredV = srcV;
+                    assert(singlePredV != invalidVersion && "single pred version should be valid");
+                }
+                else
+                {
+                    // The second predecessor confirms this dst is not single-pred:
+                    // flush deferred first edge, then append current edge.
+                    if (inedge == 2)
+                    {
+                        assert(singlePredV != invalidVersion && "deferred first pred should be valid");
+                        Edges.emplace_back(singlePredV, dstConsumeV);
+                    }
+                    Edges.emplace_back(srcV, dstConsumeV);
+                }
 
-                addPlannedEdge(srcV, dstConsumeV, false);
-
-                // Keep old SCC semantics: record edge/node, but do not expand from store/delta.
-                if (delta(dstId) || isStore(dstId))
-                    continue;
-
-                if (markVisited(dstId))
-                    waveQueue.push(dst);
+                if (markDiscovered(srcId))
+                    waveQueue.push(src);
             }
-            if (deltaSource(srcId))
+
+            // 后向收缩 (delta 有虚入边所以不做收缩)
+            if (!dstIsDelta)
             {
-                if (enableProfile)
-                    ++profile.step1DeltaSourceHits;
-                const MRSVFGNode *srcMR = SVFUtil::dyn_cast<MRSVFGNode>(src);
+                if(inedge == 1){
+                    Equiv.emplace_back(dstConsumeV, singlePredV);
+                }
+                continue;
+            }
+
+            const MRSVFGNode *dstMR = SVFUtil::dyn_cast<MRSVFGNode>(dst);
+            if (!dstMR || !dstMR->getPointsTo().test(o))
+                continue;
+
+            const Map<NodeID, NodeVector>::const_iterator deltaSrcIt = deltaSrcCacheByDst.find(dstId);
+            if (deltaSrcIt == deltaSrcCacheByDst.end())
+                continue;
+
+            for (const NodeID srcId : deltaSrcIt->second)
+            {
+                const SVFGNode *srcNode = svfg->getSVFGNode(srcId);
+                const MRSVFGNode *srcMR = SVFUtil::dyn_cast<MRSVFGNode>(srcNode);
                 if (!srcMR || !srcMR->getPointsTo().test(o))
                     continue;
 
-                const NodeVector &deltaDsts = getDeltaDstsForSrc(srcId);
-                for (const NodeID dstId : deltaDsts)
-                {
-                    if (enableProfile)
-                        ++profile.step1DeltaCandidates;
-                    const SVFGNode *dstNode = svfg->getSVFGNode(dstId);
-                    const MRSVFGNode *dstMR = SVFUtil::dyn_cast<MRSVFGNode>(dstNode);
-                    if (!dstMR || !dstMR->getPointsTo().test(o))
-                        continue;
-                    if (enableProfile)
-                        ++profile.step1DeltaAccepted;
+                const Version srcConsumeV = getOrCreateConsumeVersion(srcId);
+                const Version srcV = isStore(srcId) ? getOrCreateStoreYieldVersion(srcId) : srcConsumeV;
+                VEdges.emplace_back(srcV, dstConsumeV);
 
-                    assert(delta(dstId) && "VFS::buildVDG: delta-source cache should only target delta nodes!");
-
-                    const Version dstConsumeV = getOrCreateConsumeVersion(dstId);
-                    if (isStore(dstId))
-                        (void)getOrCreateStoreYieldVersion(dstId);
-                    addPlannedEdge(srcV, dstConsumeV, true);
-
-                    // Keep old SCC semantics: do not expand from store/delta.
-                    if (delta(dstId) || isStore(dstId))
-                        continue;
-
-                    if (dstNode != nullptr && markVisited(dstId))
-                        waveQueue.push(dstNode);
-                }
+                if (srcNode != nullptr && markDiscovered(srcId))
+                    waveQueue.push(srcNode);
             }
         }
         if (enableProfile)
             profile.step1Ticks += stat->getClk(true) - step1StartTicks;
-        if (enableProfile)
+
+        const Version nextVersionBeforeDense = nextVersion;
+
+        // step 2: 基于 DSU 合并等价版本 (单前驱非 delta 版本)，并重映射版本号到连续空间
+        const double step2StartTicks = enableProfile ? stat->getClk(true) : 0.0;
+        VersionDSU equivDsu;
+        equivDsu.reset(nextVersion);
+        for (const std::pair<Version, Version> &eq : Equiv)
+            (void)equivDsu.unite(eq.first, eq.second);
+
+        // Build root -> dense-version map (1..N) after DSU is frozen.
+        // Versions are already dense in [1..nextVersion], so vector remap is
+        // cheaper than per-lookup hash maps in this hot path.
+        std::vector<Version> rootToDense(static_cast<size_t>(nextVersion) + 1, invalidVersion);
+        std::vector<Version> versionToDense(static_cast<size_t>(nextVersion) + 1, invalidVersion);
+        Version nextDenseVersion = invalidVersion;
+        for (Version v = invalidVersion + 1; v <= nextVersion; ++v)
         {
-            profile.plannedSolidEdges += static_cast<u64_t>(solidEdges.size());
-            profile.plannedVirtualEdges += static_cast<u64_t>(virtualEdges.size());
+            const Version root = equivDsu.find(v);
+            if (root == VersionedFlowSensitive::invalidVersion)
+                continue;
+
+            Version &denseSlot = rootToDense[root];
+            if (denseSlot == invalidVersion)
+            {
+                denseSlot = ++nextDenseVersion;
+            }
+            versionToDense[v] = denseSlot;
         }
 
-        // --- step 2: materialize dense nodes/edges, then simplify + bind labels ---
+        auto toDenseVersion = [&versionToDense](const Version oldV) -> Version
+        {
+            if (oldV == invalidVersion)
+                return invalidVersion;
+            const size_t idx = static_cast<size_t>(oldV);
+            if (idx >= versionToDense.size())
+                return invalidVersion;
+            return versionToDense[idx];
+        };
+
+        // Rewrite all versioned artifacts to dense ids before materialization.
+        for (const NodeID stmtId : touchedConsumeLocs)
+            consumeVersionByLoc[stmtId] = toDenseVersion(consumeVersionByLoc[stmtId]);
+        for (const NodeID stmtId : touchedYieldLocs)
+            yieldVersionByLoc[stmtId] = toDenseVersion(yieldVersionByLoc[stmtId]);
+        for (std::pair<Version, NodeID> &vs : osStmtReliance)
+            vs.first = toDenseVersion(vs.first);
+
+        size_t edgeWrite = 0;
+        for (const std::pair<Version, Version> &edge : Edges)
+        {
+            const Version src = toDenseVersion(edge.first);
+            const Version dst = toDenseVersion(edge.second);
+            if (src == invalidVersion || dst == invalidVersion || src == dst)
+                continue;
+            Edges[edgeWrite++] = std::make_pair(src, dst);
+        }
+        Edges.resize(edgeWrite);
+
+        size_t vedgeWrite = 0;
+        for (const std::pair<Version, Version> &edge : VEdges)
+        {
+            const Version src = toDenseVersion(edge.first);
+            const Version dst = toDenseVersion(edge.second);
+            if (src == invalidVersion || dst == invalidVersion || src == dst)
+                continue;
+            VEdges[vedgeWrite++] = std::make_pair(src, dst);
+        }
+        VEdges.resize(vedgeWrite);
+
+        nextVersion = nextDenseVersion;
+        if (enableProfile)
+            profile.step2Ticks += stat->getClk(true) - step2StartTicks;
+
+        // --- step 3: materialize dense nodes/edges, then run simplify passes ---
+        const double step3StartTicks = enableProfile ? stat->getClk(true) : 0.0;
         if (nextVersion != invalidVersion)
             graph->ensureVersionCapacity(nextVersion);
 
-        const double step2NodeStartTicks = enableProfile ? stat->getClk(true) : 0.0;
         // label node
-        for (const LocToVersionMap::value_type &lv : objectConsume)
+        for (const NodeID stmtId : touchedConsumeLocs)
         {
-            graph->getOrAddNode(lv.second, isLoad(lv.first), false);
-            if (enableProfile)
-                ++profile.materializeNodeCalls;
+            const Version consumeV = consumeVersionByLoc[stmtId];
+            if (consumeV == invalidVersion)
+                continue;
+            graph->getOrAddNode(consumeV, isLoad(stmtId), false);
         }
-        for (const LocToVersionMap::value_type &lv : objectYield)
+        for (const NodeID stmtId : touchedYieldLocs)
         {
-            graph->getOrAddNode(lv.second, false, true);
-            if (enableProfile)
-                ++profile.materializeNodeCalls;
+            const Version yieldV = yieldVersionByLoc[stmtId];
+            if (yieldV == invalidVersion)
+                continue;
+            graph->getOrAddNode(yieldV, false, true);
         }
-        if (enableProfile)
-            profile.step2NodeTicks += stat->getClk(true) - step2NodeStartTicks;
-
-        const double step2EdgeStartTicks = enableProfile ? stat->getClk(true) : 0.0;
         // add edges
-        for (const std::pair<Version, Version> &edge : solidEdges)
+        for (const std::pair<Version, Version> &edge : Edges)
         {
             graph->addEdge(edge.first, edge.second, false);
-            if (enableProfile)
-                ++profile.materializeEdgeCalls;
         }
-        for (const std::pair<Version, Version> &edge : virtualEdges)
+        for (const std::pair<Version, Version> &edge : VEdges)
         {
             graph->addEdge(edge.first, edge.second, true);
-            if (enableProfile)
-                ++profile.materializeEdgeCalls;
         }
-        if (enableProfile)
-            profile.step2EdgeTicks += stat->getClk(true) - step2EdgeStartTicks;
+        // add store consume->yield virtual edges
+        for (const NodeID storeId : touchedYieldLocs)
+        {
+            const Version yieldV = yieldVersionByLoc[storeId];
+            const Version consumeV = consumeVersionByLoc[storeId];
+            if (consumeV != invalidVersion && yieldV != invalidVersion && consumeV != yieldV)
+            {
+                (void)graph->addEdge(consumeV, yieldV, true);
+            }
+        }
 
-        const double step2SimplifyStartTicks = enableProfile ? stat->getClk(true) : 0.0;
         for (size_t passIdx = 0; passIdx < passes.size(); ++passIdx)
         {
-            const double passStartTicks = enableProfile ? stat->getClk(true) : 0.0;
             passes[passIdx](*graph);
             if (enableProfile)
             {
-                simplifyPassTicks[passIdx] += stat->getClk(true) - passStartTicks;
-                ++simplifyPassRuns[passIdx];
-
-                const u64_t nodeCount = static_cast<u64_t>(graph->getTotalNodeNum());
-                u64_t edgeCount = 0;
-                graph->forEachSuperNode([&edgeCount](Version, VDGNode *node)
-                {
-                    edgeCount += static_cast<u64_t>(node->getSolidOut().size() + node->getVirtualOut().size());
-                });
-
-                simplifyPassNodeSum[passIdx] += nodeCount;
-                simplifyPassEdgeSum[passIdx] += edgeCount;
-                if (nodeCount > simplifyPassNodeMax[passIdx])
-                    simplifyPassNodeMax[passIdx] = nodeCount;
-                if (edgeCount > simplifyPassEdgeMax[passIdx])
-                    simplifyPassEdgeMax[passIdx] = edgeCount;
+                const u64_t nodesAfterPass = static_cast<u64_t>(graph->getTotalNodeNum());
+                ++passRuns[passIdx];
+                passVDGNodeTotal[passIdx] += nodesAfterPass;
+                if (nodesAfterPass > passVDGNodeMax[passIdx])
+                    passVDGNodeMax[passIdx] = nodesAfterPass;
             }
         }
         if (enableProfile)
-            profile.step2SimplifyTicks += stat->getClk(true) - step2SimplifyStartTicks;
+            profile.step3Ticks += stat->getClk(true) - step3StartTicks;
 
-        // --- step 3: shrink inside object pipeline, then map labels ---
-        const double step3PrepStartTicks = enableProfile ? stat->getClk(true) : 0.0;
+        // --- step 4: shrink/publish inside object pipeline, then map labels ---
+        const double step4StartTicks = enableProfile ? stat->getClk(true) : 0.0;
         VDG *oldGraph = graph;
         NodeVector oldReps;
         oldReps.reserve(oldGraph->getTotalNodeNum());
@@ -578,21 +685,21 @@ void VersionedFlowSensitive::buildVDG(void)
         };
 
         std::vector<std::pair<NodeID, Version>> remappedConsumes;
-        remappedConsumes.reserve(objectConsume.size());
-        for (const LocToVersionMap::value_type &lv : objectConsume)
+        remappedConsumes.reserve(touchedConsumeLocs.size());
+        for (const NodeID stmtId : touchedConsumeLocs)
         {
-            const Version newV = mapToShrunkRep(lv.second);
+            const Version newV = mapToShrunkRep(consumeVersionByLoc[stmtId]);
             if (newV != invalidVersion)
-                remappedConsumes.emplace_back(lv.first, newV);
+                remappedConsumes.emplace_back(stmtId, newV);
         }
 
         std::vector<std::pair<NodeID, Version>> remappedYields;
-        remappedYields.reserve(objectYield.size());
-        for (const LocToVersionMap::value_type &lv : objectYield)
+        remappedYields.reserve(touchedYieldLocs.size());
+        for (const NodeID stmtId : touchedYieldLocs)
         {
-            const Version newV = mapToShrunkRep(lv.second);
+            const Version newV = mapToShrunkRep(yieldVersionByLoc[stmtId]);
             if (newV != invalidVersion)
-                remappedYields.emplace_back(lv.first, newV);
+                remappedYields.emplace_back(stmtId, newV);
         }
 
         std::vector<std::pair<Version, NodeID>> remappedStmtReliance;
@@ -603,10 +710,7 @@ void VersionedFlowSensitive::buildVDG(void)
             if (newV != invalidVersion)
                 remappedStmtReliance.emplace_back(newV, vs.second);
         }
-        if (enableProfile)
-            profile.step3PrepTicks += stat->getClk(true) - step3PrepStartTicks;
 
-        const double step3RebuildStartTicks = enableProfile ? stat->getClk(true) : 0.0;
         std::unique_ptr<VDG> newGraph = std::make_unique<VDG>(o);
         if (nextNewV != invalidVersion)
             newGraph->ensureVersionCapacity(nextNewV);
@@ -617,8 +721,6 @@ void VersionedFlowSensitive::buildVDG(void)
             const Version newV = oldToNew[oldV];
             VDGNode *oldNode = oldGraph->getNode(oldV);
             newGraph->getOrAddNode(newV, oldNode->isLoadConsume(), oldNode->isStoreYield());
-            if (enableProfile)
-                ++profile.shrinkNodeCalls;
         }
 
         // Rebuild edges in the shrunk graph.
@@ -635,8 +737,6 @@ void VersionedFlowSensitive::buildVDG(void)
                 if (newDst != invalidVersion)
                 {
                     (void)newGraph->addEdge(newSrc, newDst, false);
-                    if (enableProfile)
-                        ++profile.shrinkEdgeCalls;
                 }
             }
 
@@ -648,21 +748,26 @@ void VersionedFlowSensitive::buildVDG(void)
                 if (newDst != invalidVersion)
                 {
                     (void)newGraph->addEdge(newSrc, newDst, true);
-                    if (enableProfile)
-                        ++profile.shrinkEdgeCalls;
                 }
             }
         }
-        if (enableProfile)
-            profile.step3RebuildTicks += stat->getClk(true) - step3RebuildStartTicks;
 
         // Publish shrunk graph for this object.
-        const double step3PublishStartTicks = enableProfile ? stat->getClk(true) : 0.0;
         VDGManager::VDGMapTy &allVDGs = vdgManager.getAllVDGs();
         VDGManager::VDGMapTy::iterator vdgIt = allVDGs.find(o);
         assert(vdgIt != allVDGs.end() && "VDG must exist for current object");
         vdgIt->second = std::move(newGraph);
         graph = vdgIt->second.get();
+        if (enableProfile)
+        {
+            ++profile.compressObjects;
+            profile.preDenseVersionTotal += static_cast<u64_t>(nextVersionBeforeDense);
+            profile.denseVersionTotal += static_cast<u64_t>(nextDenseVersion);
+            if (static_cast<u64_t>(nextVersionBeforeDense) > profile.preDenseVersionMax)
+                profile.preDenseVersionMax = static_cast<u64_t>(nextVersionBeforeDense);
+            if (static_cast<u64_t>(nextDenseVersion) > profile.denseVersionMax)
+                profile.denseVersionMax = static_cast<u64_t>(nextDenseVersion);
+        }
 
         // Rebuild pending singleton-upgrade list only for store c->y edges
         // that survive simplify/shrink as virtual edges in the final graph.
@@ -671,23 +776,25 @@ void VersionedFlowSensitive::buildVDG(void)
         for (const std::pair<NodeID, Version> &lv : remappedConsumes)
             remappedConsumeByLoc[lv.first] = lv.second;
 
+        // Check store stmt consume/yield consistency after shrink.
+        // If consume/yield differ, keep a virtual c->y edge and record pending upgrade.
         for (const std::pair<NodeID, Version> &lv : remappedYields)
         {
             const NodeID storeId = lv.first;
-            const Version y = lv.second;
+            const Version yieldV = lv.second;
             const auto cIt = remappedConsumeByLoc.find(storeId);
             if (cIt == remappedConsumeByLoc.end())
                 continue;
 
-            const Version c = cIt->second;
-            if (c == invalidVersion || y == invalidVersion || c == y)
-                continue;
-            if (!graph->hasVersion(c) || !graph->hasVersion(y))
+            const Version consumeV = cIt->second;
+            if (consumeV == invalidVersion || yieldV == invalidVersion)
                 continue;
 
-            const VDGNode *cNode = graph->getNode(c);
-            if (cNode->getVirtualOut().contains(y) && !cNode->getSolidOut().contains(y))
-                pendingStoreObjsByLoc[storeId].push_back(o);
+            const bool consumeYieldConsistent = (consumeV == yieldV);
+            if (consumeYieldConsistent)
+                continue;
+
+            pendingStoreObjsByLoc[storeId].push_back(o);
         }
 
         // Map consume/yield/reliance after shrink.
@@ -699,84 +806,43 @@ void VersionedFlowSensitive::buildVDG(void)
 
         for (const std::pair<Version, NodeID> &vs : remappedStmtReliance)
             graph->bindStmtRelianceStmt(vs.first, vs.second);
+
         if (enableProfile)
-        {
-            const double objEndTicks = stat->getClk(true);
-            profile.step3PublishTicks += objEndTicks - step3PublishStartTicks;
-            profile.perObjTicks += objEndTicks - objStartTicks;
-        }
+            profile.step4Ticks += stat->getClk(true) - step4StartTicks;
     }
+    // Release reverse delta cache after build loop completes.
+    Map<NodeID, NodeVector>().swap(deltaSrcCacheByDst);
 
     const double totalEndTicks = stat->getClk(true);
     vdgBuildTime = (totalEndTicks - labelStart) / TIMEINTERVAL;
 
     if (enableProfile)
     {
-        auto passNameOf = [](VDGSimplifyPass pass) -> const char *
+        SVFUtil::outs()
+            << "buildVDG.hot.summary\tobjects:" << profile.objects
+            << " totalTime:" << vdgBuildTime
+            << " step1Time:" << profile.step1Ticks / TIMEINTERVAL
+            << " step2Time:" << profile.step2Ticks / TIMEINTERVAL
+            << " step3Time:" << profile.step3Ticks / TIMEINTERVAL
+            << " step4Time:" << profile.step4Ticks / TIMEINTERVAL
+            << "\n";
+
+        SVFUtil::outs()
+            << "buildVDG.compress.summary\tobjects:" << profile.compressObjects
+            << " nextVersionTotal:" << profile.preDenseVersionTotal
+            << " nextVersionMax:" << profile.preDenseVersionMax
+            << " denseVersionTotal:" << profile.denseVersionTotal
+            << " denseVersionMax:" << profile.denseVersionMax
+            << "\n";
+
+        for (size_t passIdx = 0; passIdx < passes.size(); ++passIdx)
         {
-            if (pass == vdgSimplifySCCMerge) return "scc_merge";
-            if (pass == vdgSimplifyReverseReachMerge) return "reverse_reach_merge";
-            if (pass == vdgSimplifyStableReachability) return "stable_reachability";
-            if (pass == vdgSimplifyPrune) return "prune";
-            if (pass == vdgSimplifyTransRedundancy) return "transitive_redundancy";
-            if (pass == vdgSimplifyChainContraction) return "chain_contraction";
-            return "unknown";
-        };
-
-        SVFUtil::outs()
-            << "buildVDG.profile.summary\tobjects:" << profile.objects
-            << " emptyStart:" << profile.emptyStartObjects
-            << " totalTime:" << (totalEndTicks - labelStart) / TIMEINTERVAL
-            << " objPipelineTime:" << profile.perObjTicks / TIMEINTERVAL
-            << "\n";
-
-        SVFUtil::outs()
-            << "buildVDG.profile.step1\twavePops:" << profile.step1WavePops
-            << " outEdges:" << profile.step1OutEdges
-            << " matchedIndirect:" << profile.step1MatchedIndirectEdges
-            << " deltaSrcHits:" << profile.step1DeltaSourceHits
-            << " deltaCandidates:" << profile.step1DeltaCandidates
-            << " deltaAccepted:" << profile.step1DeltaAccepted
-            << " plannedSolid:" << profile.plannedSolidEdges
-            << " plannedVirtual:" << profile.plannedVirtualEdges
-            << " time:" << profile.step1Ticks / TIMEINTERVAL
-            << "\n";
-
-        SVFUtil::outs()
-            << "buildVDG.profile.step2\tgetOrAddNodeCalls:" << profile.materializeNodeCalls
-            << " addEdgeCalls:" << profile.materializeEdgeCalls
-            << " nodeTime:" << profile.step2NodeTicks / TIMEINTERVAL
-            << " edgeTime:" << profile.step2EdgeTicks / TIMEINTERVAL
-            << " simplifyTime:" << profile.step2SimplifyTicks / TIMEINTERVAL
-            << "\n";
-
-        for (size_t i = 0; i < passes.size(); ++i)
-        {
-            const u64_t runs = simplifyPassRuns[i];
-            const double avgNodeCount = runs == 0
-                ? 0.0
-                : static_cast<double>(simplifyPassNodeSum[i]) / static_cast<double>(runs);
-            const double avgEdgeCount = runs == 0
-                ? 0.0
-                : static_cast<double>(simplifyPassEdgeSum[i]) / static_cast<double>(runs);
             SVFUtil::outs()
-                << "buildVDG.profile.pass\tidx:" << i
-                << " name:" << passNameOf(passes[i])
-                << " runs:" << runs
-                << " time:" << simplifyPassTicks[i] / TIMEINTERVAL
-                << " nodeAvg:" << avgNodeCount
-                << " nodeMax:" << simplifyPassNodeMax[i]
-                << " edgeAvg:" << avgEdgeCount
-                << " edgeMax:" << simplifyPassEdgeMax[i]
+                << "buildVDG.pass.summary\tidx:" << passIdx
+                << " runs:" << passRuns[passIdx]
+                << " vdgNodeTotal:" << passVDGNodeTotal[passIdx]
+                << " vdgNodeMax:" << passVDGNodeMax[passIdx]
                 << "\n";
         }
-
-        SVFUtil::outs()
-            << "buildVDG.profile.step3\tnewNodeCalls:" << profile.shrinkNodeCalls
-            << " addEdgeCalls:" << profile.shrinkEdgeCalls
-            << " prepTime:" << profile.step3PrepTicks / TIMEINTERVAL
-            << " rebuildTime:" << profile.step3RebuildTicks / TIMEINTERVAL
-            << " publishTime:" << profile.step3PublishTicks / TIMEINTERVAL
-            << "\n";
     }
 }

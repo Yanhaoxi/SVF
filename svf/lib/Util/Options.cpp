@@ -239,7 +239,7 @@ const Option<std::string> Options::VDGOutput(
 
 const Option<std::string> Options::VDGPassOrder(
     "vdg-pass-order",
-    "VDG simplify pass order letters: S=scc, A=reverse-anchor, M=stable-reach, P=prune, T=trans-redundancy, C=chain",
+    "VDG simplify pass order letters: S=scc, A=reverse-anchor, M=stable-reach, B=store/virtual-in-bfs-merge, P=prune, T=trans-redundancy, C=chain",
     "SPC"
 );
 

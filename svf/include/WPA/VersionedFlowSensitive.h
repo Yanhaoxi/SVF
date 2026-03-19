@@ -293,7 +293,6 @@ private:
 
     /// Additional statistics.
     //@{
-    u32_t numPrelabeledNodes;  ///< Number of prelabeled nodes.
     u32_t numPrelabelVersions; ///< Number of versions created during prelabeling.
 
     double prelabelingTime;  ///< Time to prelabel SVFG.

@@ -35,7 +35,7 @@ VersionedVar VersionedFlowSensitive::atKey(NodeID var, Version version)
 VersionedFlowSensitive::VersionedFlowSensitive(SVFIR *_pag, PTATY type)
     : FlowSensitive(_pag, type)
 {
-    numPrelabeledNodes = numPrelabelVersions = 0;
+    numPrelabelVersions = 0;
     prelabelingTime = versionPropTime = vdgBuildTime = 0.0;
     // We'll grab vPtD in initialize.
 
@@ -295,11 +295,18 @@ void VersionedFlowSensitive::propagateAllVersions()
         assert(graph->hasPendingUpdates() && "VFS::propagateAllVersions: pending VDG should have updates!");
 
         // Define propagation callback: union pts from srcV to dstV
-        auto propagateCallback = [this, obj](Version srcV, Version dstV) -> bool
+        auto propagateCallback = [this, obj, graph](Version srcV, Version dstV) -> bool
         {
             const VersionedVar srcVar = atKey(obj, srcV);
             const VersionedVar dstVar = atKey(obj, dstV);
-            return vPtD->unionPts(dstVar, srcVar);
+            const bool changed = vPtD->unionPts(dstVar, srcVar);
+
+            // After sub-rep -> rep sync, the merged-away source version is dead.
+            // Reclaim its versioned points-to set eagerly.
+            if (!graph->isSuperVersion(srcV))
+                vPtD->clearFullPts(srcVar);
+
+            return changed;
         };
 
         // Define stmt reliance callback: push related stmts to worklist and clear load cache.

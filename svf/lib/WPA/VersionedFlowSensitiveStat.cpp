@@ -166,6 +166,45 @@ void VersionedFlowSensitiveStat::versionStat(void)
     _NumSingleVersion = 0;
     _MaxVersions = 0;
 
+    // Build per-object unique-version cardinality across consume/yield maps.
+    // This fixes MaxVersionsForObj (and TotalSingleVObjs) being stuck at 0.
+    Set<NodeID> objects;
+    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ovm : vfspta->consume)
+        if (ovm.second) objects.insert(ovm.first);
+    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ovm : vfspta->yield)
+        if (ovm.second) objects.insert(ovm.first);
+
+    for (const NodeID o : objects)
+    {
+        Set<Version> objVersions;
+
+        const VersionedFlowSensitive::ObjToLocVersionMap::const_iterator cIt = vfspta->consume.find(o);
+        if (cIt != vfspta->consume.end() && cIt->second)
+        {
+            for (const VersionedFlowSensitive::LocToVersionMap::value_type &lv : *(cIt->second))
+            {
+                if (lv.second != VersionedFlowSensitive::invalidVersion)
+                    objVersions.insert(lv.second);
+            }
+        }
+
+        const VersionedFlowSensitive::ObjToLocVersionMap::const_iterator yIt = vfspta->yield.find(o);
+        if (yIt != vfspta->yield.end() && yIt->second)
+        {
+            for (const VersionedFlowSensitive::LocToVersionMap::value_type &lv : *(yIt->second))
+            {
+                if (lv.second != VersionedFlowSensitive::invalidVersion)
+                    objVersions.insert(lv.second);
+            }
+        }
+
+        const u32_t versionNum = static_cast<u32_t>(objVersions.size());
+        if (versionNum > _MaxVersions)
+            _MaxVersions = versionNum;
+        if (versionNum == 1)
+            ++_NumSingleVersion;
+    }
+
     u32_t totalVersionPtsSize = 0;
     for (const VersionedFlowSensitive::ObjToLocVersionMap *lvm :
             {

@@ -53,7 +53,7 @@ namespace SVF
 class VDGNode
 {
 public:
-    using AdjSet = SmallDenseSet<Version, 4>;
+    using AdjSet = SmallDenseSet<Version, 2>;
 
     VDGNode(bool loadConsume = false, bool storeYield = false)
         : loadConsume_(loadConsume),
@@ -343,6 +343,9 @@ public:
     void reduceByStableSrcReachability();
     void reduceByStableDstReachability();
     void reverseReachMergeByAnchors();
+    /// Seed by store-yield / virtual-in nodes, forward-propagate seed sets
+    /// on solid edges, then merge nodes with identical seed sets.
+    void bfsMergeByStoreYieldAndVirtualIn();
     /// Contract chains; if seeds is non-null, start only from those candidate versions.
     void chainContraction(const NodeVector* seeds = nullptr);
     void transitiveRedundancyElimination();

@@ -547,6 +547,104 @@ void VDG::reverseReachMergeByAnchors()
     }
 }
 
+void VDG::bfsMergeByStoreYieldAndVirtualIn()
+{
+    NodeVector topoOrder = sccMergeSolidEdges();
+    if (topoOrder.empty())
+        return;
+
+    NodeBS seedSet;
+    forEachSuperNode([&](Version v, VDGNode* node)
+    {
+        if (node->isStoreYield() || !node->getVirtualIn().empty())
+            seedSet.set(v);
+    });
+
+    if (seedSet.empty())
+        return;
+
+    const u32_t cap = static_cast<u32_t>(capacity());
+    std::vector<NodeBS> reach(cap);
+    std::vector<std::pair<Version, Version>> redundantSolidEdges;
+
+    for (Version src : topoOrder)
+    {
+        if (seedSet.test(src))
+            reach[src].set(src);
+
+        const NodeBS &srcReach = reach[src];
+        if (srcReach.empty())
+            continue;
+
+        for (Version dst : solidOutOf(src))
+        {
+            // Topological traversal guarantees srcReach is stable here.
+            // If src contributes nothing to dst now, this solid edge is redundant.
+            if (!(reach[dst] |= srcReach))
+                redundantSolidEdges.emplace_back(src, dst);
+        }
+    }
+
+    for (const std::pair<Version, Version>& edge : redundantSolidEdges)
+        (void)removeEdge(edge.first, edge.second, false);
+
+    auto hashNodeBS = [](const NodeBS& bs) -> size_t
+    {
+        size_t h = 1469598103934665603ull;
+        for (unsigned bit : bs)
+        {
+            h ^= static_cast<size_t>(bit) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            h *= 1099511628211ull;
+        }
+        h ^= static_cast<size_t>(bs.count()) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+        return h;
+    };
+
+    Map<size_t, NodeVector> hashLeaders;
+    Map<Version, NodeVector> mergeGroups;
+
+    forEachSuperNode([&](Version v, VDGNode*)
+    {
+        const NodeBS& vReach = reach[v];
+        if (vReach.empty())
+            return;
+
+        const size_t h = hashNodeBS(vReach);
+        NodeVector& leaders = hashLeaders[h];
+
+        Version leader = 0;
+        for (Version cand : leaders)
+        {
+            if (reach[cand] == vReach)
+            {
+                leader = cand;
+                break;
+            }
+        }
+
+        if (leader == 0)
+            leaders.push_back(v);
+        else
+            mergeGroups[leader].push_back(v);
+    });
+
+    for (Map<Version, NodeVector>::value_type& kv : mergeGroups)
+    {
+        const Version leader = kv.first;
+
+        NodeVector toMerge;
+        for (Version v : kv.second)
+        {
+            if (getRepVersion(v) == getRepVersion(leader))
+                continue;
+            toMerge.push_back(v);
+        }
+
+        if (!toMerge.empty())
+            mergeVersionsIntoRep(toMerge, leader);
+    }
+}
+
 void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback onChanged)
 {
     assert(hasPendingUpdates() && "propagateInTopoOrder called with no pending updates");
@@ -589,11 +687,7 @@ void VDG::propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback
     // Solve-stage lightweight strategy: only sync newly-merged sub reps.
     for (const Version subRep : pendingMergedSubs_)
     {
-        if (!hasVersion(subRep))
-            continue;
         const Version repV = getRepVersion(subRep);
-        if (!hasVersion(repV) || !isSuperVersion(repV))
-            continue;
         if (subRep == repV)
             continue;
 
