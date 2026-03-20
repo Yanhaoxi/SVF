@@ -132,6 +132,8 @@ void VersionedFlowSensitiveStat::performStat()
     PTNumStatMap["IndEdgeSolved"] = vfspta->getNumOfResolvedIndCallEdge();
 
     PTNumStatMap["StrongUpdates"] = vfspta->svfgHasSU.count();
+    PTNumStatMap["PrelabelNodes"] = vfspta->numPrelabelNodes;
+    PTNumStatMap["PrelabelFIObjs"] = vfspta->numPrelabelFIObjs;
 
     PTNumStatMap["MaxPtsSize"]        = _MaxPtsSize;
     PTNumStatMap["MaxTopLvlPtsSize"]  = _MaxTopLvlPtsSize;

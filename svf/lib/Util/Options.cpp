@@ -239,8 +239,20 @@ const Option<std::string> Options::VDGOutput(
 
 const Option<std::string> Options::VDGPassOrder(
     "vdg-pass-order",
-    "VDG simplify pass order letters: S=scc, A=reverse-anchor, M=stable-reach, B=store/virtual-in-bfs-merge, P=prune, T=trans-redundancy, C=chain",
-    "SPC"
+    "VDG simplify pass order letters: S=scc, A=reverse-anchor, M=stable-reach, B=store/virtual-in-bfs-merge, L=load/virtual-out-bfs-merge, P=prune, T=trans-redundancy, C=chain",
+    "SPCBLC"
+);
+
+const Option<bool> Options::VDGPassProfile(
+    "vdg-pass-profile",
+    "Enable pass-pattern profiling for VDG (separate from -vdg-stat)",
+    false
+);
+
+const Option<bool> Options::VFSObjFSLowerBound(
+    "vfs-obj-fs-lower-bound",
+    "Pre-estimate object flow-sensitive lower bound and choose store c->y virtual/solid edges accordingly",
+    true
 );
 
 // Base class of pointer analyses (PointerAnalysis.cpp)

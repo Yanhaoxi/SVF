@@ -346,6 +346,10 @@ public:
     /// Seed by store-yield / virtual-in nodes, forward-propagate seed sets
     /// on solid edges, then merge nodes with identical seed sets.
     void bfsMergeByStoreYieldAndVirtualIn();
+    /// Dual of bfsMergeByStoreYieldAndVirtualIn:
+    /// seed by load-consume / virtual-out nodes, backward-propagate seed sets
+    /// on solid edges, then merge nodes with identical seed sets.
+    void bfsMergeByLoadConsumeAndVirtualOut();
     /// Contract chains; if seeds is non-null, start only from those candidate versions.
     void chainContraction(const NodeVector* seeds = nullptr);
     void transitiveRedundancyElimination();

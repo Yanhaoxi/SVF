@@ -36,6 +36,8 @@ VersionedFlowSensitive::VersionedFlowSensitive(SVFIR *_pag, PTATY type)
     : FlowSensitive(_pag, type)
 {
     numPrelabelVersions = 0;
+    numPrelabelNodes = 0;
+    numPrelabelFIObjs = 0;
     prelabelingTime = versionPropTime = vdgBuildTime = 0.0;
     // We'll grab vPtD in initialize.
 
@@ -56,11 +58,12 @@ void VersionedFlowSensitive::initialize()
     stmtPtsCache.clear();
     stmtPtsCache.resize(svfg->getTotalNodeNum());
     const double computeBotStart = stat->getClk(true);
-    computeBot();
     SVFUtil::outs() << "computeBotTime\t" << (stat->getClk(true) - computeBotStart) / TIMEINTERVAL << "\n";
     prelabel();
     // Build VDGs in object-major streaming mode (includes simplify + stmt-reliance bind).
     buildVDG();
+    if (Options::VDGPassProfile())
+        return;
 
     if (Options::DumpVDG())
     {
@@ -76,6 +79,13 @@ void VersionedFlowSensitive::initialize()
     vdgManager.enterSolveAll();
 
     removeAllIndirectSVFGEdges();
+}
+
+void VersionedFlowSensitive::solveConstraints()
+{
+    if (Options::VDGPassProfile())
+        return;
+    FlowSensitive::solveConstraints();
 }
 
 void VersionedFlowSensitive::finalize()
@@ -211,46 +221,6 @@ void VersionedFlowSensitive::removeAllIndirectSVFGEdges(void)
     }
 
     setGraph(svfg);
-}
-
-void VersionedFlowSensitive::computeBot(void)
-{
-    // computeBot is temporarily disabled.
-    // Original logic intentionally commented out.
-#if 0
-    // Slice of the standard solveConstraints loop:
-    // - Seed worklist with address nodes only.
-    // - Keep SCC/updateCallGraph outer fixpoint.
-    // - Skip memory-deref behaviors (load/store) in node processing.
-
-    // Clear any residual nodes from priority worklists.
-    while (!isWorklistEmpty())
-        (void)popFromWorklist();
-
-    // Init with addr nodes only.
-    for (SVFG::const_iterator it = svfg->begin(); it != svfg->end(); ++it)
-    {
-        if (SVFUtil::isa<AddrSVFGNode>(it->second))
-            pushIntoWorklist(it->first);
-    }
-
-    do
-    {
-        callGraphSCC->find();
-
-        while (!isWorklistEmpty())
-        {
-            const NodeID nodeId = popFromWorklist();
-            const SVFGNode *node = svfg->getSVFGNode(nodeId);
-            if (SVFUtil::isa<LoadSVFGNode, StoreSVFGNode>(node))
-                continue;
-
-            processNode(nodeId);
-            collapseFields();
-        }
-    }
-    while (updateCallGraph(getIndirectCallsites()));
-#endif
 }
 
 void VersionedFlowSensitive::solveWorklist()

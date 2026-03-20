@@ -175,14 +175,15 @@ public:
 
     void readPtsFromFile(const std::string& filename) override;
 
+    /// Skip solving when pass-profile mode is enabled.
+    void solveConstraints() override;
+
     /// Dumps a MeldVersion to stdout.
     static void dumpMeldVersion(MeldVersion &v);
 
 private:
     /// Prelabel the SVFG: set y(o) for stores and c(o) for delta nodes to a new version.
     void prelabel(void);
-    /// Run a standard worklist slice before versioning, skipping load/store solving.
-    void computeBot(void);
     /// Build VDG in object-major pipeline (includes labeling/materialization/simplify/bind).
     void buildVDG(void);
     /// Melds v2 into v1 (in place), returns whether a change occurred.
@@ -270,6 +271,8 @@ private:
     }
 
     Set<NodeID> prelabeledObjects;
+    /// Objects pre-estimated as non-strong-update candidates.
+    Set<NodeID> fiObjects;
     /// Object -> prelabel starting SVFG node ids used by buildVDG step1.
     Map<NodeID, NodeVector> objStartingNodes;
 
@@ -294,6 +297,8 @@ private:
     /// Additional statistics.
     //@{
     u32_t numPrelabelVersions; ///< Number of versions created during prelabeling.
+    u32_t numPrelabelNodes;    ///< Number of load nodes participating in prelabeling.
+    u32_t numPrelabelFIObjs;   ///< Number of pre-labeled FI objects.
 
     double prelabelingTime;  ///< Time to prelabel SVFG.
     double versionPropTime;  ///< Time to propagate versions to versions which rely on them.

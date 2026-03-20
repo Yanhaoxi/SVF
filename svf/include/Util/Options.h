@@ -115,6 +115,8 @@ public:
     static const Option<u32_t> VDGMaxNodes;
     static const Option<std::string> VDGOutput;
     static const Option<std::string> VDGPassOrder;
+    static const Option<bool> VDGPassProfile;
+    static const Option<bool> VFSObjFSLowerBound;
 
     // Base class of pointer analyses (PointerAnalysis.cpp)
     static const Option<bool> TypePrint;
