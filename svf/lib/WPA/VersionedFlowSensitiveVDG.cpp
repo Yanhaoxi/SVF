@@ -484,7 +484,6 @@ void VersionedFlowSensitive::buildVDG(void)
             if (startNode == nullptr)
                 continue;
             assert(SVFUtil::isa<LoadSVFGNode>(startNode) && "starting nodes should be loads");
-            (void)getOrCreateConsumeVersion(startId);
             if (markDiscovered(startId))
                 waveQueue.push(startNode);
         }
@@ -538,6 +537,9 @@ void VersionedFlowSensitive::buildVDG(void)
                     }
                     Edges.emplace_back(srcV, dstConsumeV);
                 }
+
+                if (markDiscovered(srcId))
+                    waveQueue.push(src);
             }
 
             // 后向收缩 (delta 有虚入边所以不做收缩)
@@ -1281,7 +1283,7 @@ namespace
                 strongConnect(v);
         }
 
-        // Step5: reachability ratios over solid edges.
+        // Step5: reachability ratios over both solid and virtual edges.
         Set<ProfileKey> storeSeen;
         std::queue<ProfileKey> storeQ;
         for (const auto &kn : graph.nodes)
@@ -1299,6 +1301,13 @@ namespace
             if (curIt == graph.nodes.end())
                 continue;
             for (const ProfileKey dst : curIt->second.solidOut)
+            {
+                if (graph.nodes.find(dst) == graph.nodes.end())
+                    continue;
+                if (storeSeen.insert(dst).second)
+                    storeQ.push(dst);
+            }
+            for (const ProfileKey dst : curIt->second.virtualOut)
             {
                 if (graph.nodes.find(dst) == graph.nodes.end())
                     continue;
@@ -1325,6 +1334,13 @@ namespace
             if (curIt == graph.nodes.end())
                 continue;
             for (const ProfileKey src : curIt->second.solidIn)
+            {
+                if (graph.nodes.find(src) == graph.nodes.end())
+                    continue;
+                if (loadRevSeen.insert(src).second)
+                    loadRevQ.push(src);
+            }
+            for (const ProfileKey src : curIt->second.virtualIn)
             {
                 if (graph.nodes.find(src) == graph.nodes.end())
                     continue;
