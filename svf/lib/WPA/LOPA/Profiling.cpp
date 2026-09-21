@@ -1353,6 +1353,32 @@ namespace
             << " time:" << totalTime
             << "\n";
 
+        // Also report every proper prefix of the order (e.g. S and SP for SPC),
+        // so a single sweep run yields the prefix distribution for free.
+        for (size_t i = 0; i + 1 < cfg.order.size(); ++i)
+        {
+            double cumTime = 0.0;
+            for (size_t j = 0; j <= i; ++j)
+                cumTime += m.passSeconds[j];
+
+            SVFUtil::outs()
+                << "vdg.passprofile.config.summary"
+                << " config=kill:" << (cfg.kill ? 1 : 0)
+                << ",order:" << cfg.order.substr(0, i + 1)
+                << " graphs:" << m.graphs
+                << " n0_nodes:" << m.n0Nodes
+                << " n0_solid:" << m.n0Solid
+                << " n0_virtual:" << m.n0Virtual
+                << " n0_plain:" << m.n0Plain
+                << " n1_nodes:" << m.passNodes[i]
+                << " n1_solid:" << m.passSolid[i]
+                << " n1_virtual:" << m.passVirtual[i]
+                << " n1_plain:" << m.passPlain[i]
+                << " maxClassSize:" << m.maxClassSize
+                << " time:" << cumTime
+                << "\n";
+        }
+
         {
             u64_t b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, b7 = 0, b8 = 0;
             for (const auto &kv : m.classSizeHist)
