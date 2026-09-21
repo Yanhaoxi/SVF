@@ -437,13 +437,14 @@ void LOPA::VDGBuildContext::labelObjectVersions(const NodeVector &osStartingNode
     const double step1StartTicks = enableProfile ? pta.stat->getClk(true) : 0.0;
     std::queue<const SVFGNode *> waveQueue;
 
-    // 预处理起始 Load 节点
+    // 预处理起始节点（-lopa-no-offline 时可为任意间接边端点，否则为 Load）
     for (const NodeID startId : osStartingNodes)
     {
         const SVFGNode *startNode = pta.svfg->getSVFGNode(startId);
         if (startNode == nullptr)
             continue;
-        assert(SVFUtil::isa<LoadSVFGNode>(startNode) && "starting nodes should be loads");
+        if (!Options::LOPANoOffline())
+            assert(SVFUtil::isa<LoadSVFGNode>(startNode) && "starting nodes should be loads");
         if (markDiscovered(startId))
             waveQueue.push(startNode);
     }
@@ -546,11 +547,13 @@ void LOPA::VDGBuildContext::compressEquivVersions()
     // step 2: 基于 DSU 合并等价版本 (单前驱非 delta 版本)，并重映射版本号到连续空间
     const double step2StartTicks = enableProfile ? pta.stat->getClk(true) : 0.0;
 
-    if (Options::LOPANoOffline())
+    if (Options::LOPANoOffline() || Options::LOPANoDSU())
     {
         // Uncompressed construction: keep every version distinct and materialize
         // the deferred single-predecessor dependences as solid edges. This yields
         // a VDG without offline equivalence merging, for ablation.
+        // -lopa-no-offline additionally disables the simplify pass pipeline;
+        // -lopa-no-dsu keeps the passes so the pipeline runs on the raw graph.
         for (const std::pair<Version, Version> &eq : equiv)
         {
             if (eq.first == LOPA::invalidVersion || eq.second == LOPA::invalidVersion
@@ -915,32 +918,62 @@ void LOPA::prelabel(void)
     fiObjects.clear();
     numPrelabelNodes = 0;
     numPrelabelFIObjs = 0;
-    for (SVFG::iterator it = svfg->begin(); it != svfg->end(); ++it)
-    {
-        NodeID l = it->first;
-        const SVFGNode *ln = it->second;
 
-        if (const LoadSVFGNode *ldn = SVFUtil::dyn_cast<LoadSVFGNode>(ln))
+    if (Options::LOPANoOffline())
+    {
+        // Fully-materialized construction: anchor at every indirect-edge
+        // destination instead of load anchors, so no load-reachability pruning
+        // happens. Every object touched by any indirect edge is materialized.
+        for (SVFG::iterator it = svfg->begin(); it != svfg->end(); ++it)
         {
-            // l: p = *q.
-            // If q points to o (Andersen's), l yields a new version for o.
-            NodeID q = ldn->getPAGSrcNodeID();
-            bool hasPrelabelObj = false;
-            for (NodeID o : ander->getPts(q))
+            const SVFGNode *srcNode = it->second;
+            for (const SVFGEdge *edge : srcNode->getOutEdges())
             {
-                prelabeledObjects.insert(o);
-                objStartingNodes[o].push_back(l);
-                hasPrelabelObj = true;
+                const IndirectSVFGEdge *ie = SVFUtil::dyn_cast<IndirectSVFGEdge>(edge);
+                if (ie == nullptr)
+                    continue;
+                const NodeID dstId = ie->getDstNode()->getId();
+                for (NodeID o : ie->getPointsTo())
+                {
+                    prelabeledObjects.insert(o);
+                    objStartingNodes[o].push_back(dstId);
+                }
             }
-            if (hasPrelabelObj)
-                ++numPrelabelNodes;
+        }
+        numPrelabelNodes = static_cast<u32_t>(prelabeledObjects.size());
+    }
+    else
+    {
+        for (SVFG::iterator it = svfg->begin(); it != svfg->end(); ++it)
+        {
+            NodeID l = it->first;
+            const SVFGNode *ln = it->second;
+
+            if (const LoadSVFGNode *ldn = SVFUtil::dyn_cast<LoadSVFGNode>(ln))
+            {
+                // l: p = *q.
+                // If q points to o (Andersen's), l yields a new version for o.
+                NodeID q = ldn->getPAGSrcNodeID();
+                bool hasPrelabelObj = false;
+                for (NodeID o : ander->getPts(q))
+                {
+                    prelabeledObjects.insert(o);
+                    objStartingNodes[o].push_back(l);
+                    hasPrelabelObj = true;
+                }
+                if (hasPrelabelObj)
+                    ++numPrelabelNodes;
+            }
         }
     }
     // Pre-estimate non-strong-update objects.
     for (const NodeID o : prelabeledObjects)
     {
+        const BaseObjVar *base = pag->getBaseObject(o);
+        if (base == nullptr)
+            continue;
         if (isHeapMemObj(o) || isArrayMemObj(o)
-            || pag->getBaseObject(o)->isFieldInsensitive()
+            || base->isFieldInsensitive()
             || isLocalVarInRecursiveFun(o))
         {
             fiObjects.insert(o);

@@ -261,6 +261,12 @@ const Option<bool> Options::LOPANoOffline(
     false
 );
 
+const Option<bool> Options::LOPANoDSU(
+    "lopa-no-dsu",
+    "Disable only the single-predecessor equivalence merge (DSU); keep the VDG simplify passes (ablation)",
+    false
+);
+
 const Option<bool> Options::LOPANoLoadCache(
     "lopa-no-load-cache",
     "Disable the load delta cache: reprocess all objects of a load on every visit (ablation)",

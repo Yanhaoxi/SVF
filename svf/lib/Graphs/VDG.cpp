@@ -301,20 +301,14 @@ void VDG::removeNodeAndEdges(Version repV)
     deleteNode(repV);
 }
 
-void VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
+Version VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
 {
     if (!hasVersion(repVer))
-        return;
+        return static_cast<Version>(0);
 
     repVer = getRepVersion(repVer);
     if (!isSuperVersion(repVer))
-        return;
-
-    VDGNode* repNode = getNode(repVer);
-
-    NodeBS allSubs = std::move(subVec_[repVer]);
-    if (allSubs.empty())
-        allSubs.set(repVer);
+        return static_cast<Version>(0);
 
     NodeBS repsToMerge;
     for (Version v : versions)
@@ -328,6 +322,40 @@ void VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
             continue;
         repsToMerge.set(subRep);
     }
+
+    // Union by solid-edge degree: keep the endpoint with the most solid edges as
+    // the representative so moveEdgesToRep always moves the cheaper side. The
+    // representative choice does not affect the normal form (flags are joined,
+    // edges are moved, and self-loops are dropped), so this changes cost only.
+    auto solidDegree = [this](Version rep) -> size_t
+    {
+        VDGNode* node = getNode(rep);
+        return static_cast<size_t>(node->inSolidDegree())
+             + static_cast<size_t>(node->outSolidDegree());
+    };
+    Version actualRep = repVer;
+    size_t bestDegree = solidDegree(repVer);
+    for (Version subRep : repsToMerge)
+    {
+        const size_t d = solidDegree(subRep);
+        if (d > bestDegree)
+        {
+            bestDegree = d;
+            actualRep = subRep;
+        }
+    }
+    if (actualRep != repVer)
+    {
+        repsToMerge.reset(actualRep);
+        repsToMerge.set(repVer);
+        repVer = actualRep;
+    }
+
+    VDGNode* repNode = getNode(repVer);
+
+    NodeBS allSubs = std::move(subVec_[repVer]);
+    if (allSubs.empty())
+        allSubs.set(repVer);
 
     for (Version subRep : repsToMerge)
     {
@@ -369,6 +397,8 @@ void VDG::mergeVersionsIntoRep(const NodeVector& versions, Version repVer)
     superVersions_[repVer] = true;
     allSubs.set(repVer);
     subVec_[repVer] = std::move(allSubs);
+
+    return repVer;
 }
 
 NodeVector VDG::sccMergeSolidEdges(const NodeVector& candidates)
@@ -388,7 +418,7 @@ NodeVector VDG::sccMergeSolidEdges(const NodeVector& candidates)
         topoStack.pop();
     }
 
-    for (Version repV : topoOrder)
+    for (Version& repV : topoOrder)
     {
         if (!hasVersion(repV) || !isSuperVersion(repV))
             continue;
@@ -402,7 +432,10 @@ NodeVector VDG::sccMergeSolidEdges(const NodeVector& candidates)
         for (unsigned subU : subs)
             versions.push_back(static_cast<Version>(subU));
 
-        mergeVersionsIntoRep(versions, repV);
+        // Union by size may retain a different node from Tarjan's SCC root.
+        // Keep the SCC's topological position, but return its live representative
+        // so propagation does not skip the component as a merged-away node.
+        repV = mergeVersionsIntoRep(versions, repV);
     }
 
     return topoOrder;
@@ -905,11 +938,9 @@ void VDG::pruneUnreachableFromStoreYield()
     }
 
     NodeVector repsToRemove;
-    forEachSuperNode([&](Version repV, VDGNode* node)
+    forEachSuperNode([&](Version repV, VDGNode*)
     {
         if (reachable.test(repV))
-            return;
-        if (node->isLoadConsume())
             return;
         repsToRemove.push_back(repV);
     });
@@ -1144,9 +1175,8 @@ void VDG::chainContraction(const NodeVector* seeds)
             return;
         VDGNode* node = getNode(v);
 
-        // enqueue(v);
         for (Version src : node->getSolidIn()) enqueue(src);
-        // for (Version src : node->getVirtualIn()) enqueue(src);
+        for (Version src : node->getVirtualIn()) enqueue(src);
     };
 
     auto enqueueOutNeighbors = [&](Version v)
@@ -1155,9 +1185,8 @@ void VDG::chainContraction(const NodeVector* seeds)
             return;
         VDGNode* node = getNode(v);
 
-        // enqueue(v);
         for (Version dst : node->getSolidOut()) enqueue(dst);
-        // for (Version dst : node->getVirtualOut()) enqueue(dst);
+        for (Version dst : node->getVirtualOut()) enqueue(dst);
     };
 
     auto tryMergeForward = [&](Version x) -> bool
@@ -1171,17 +1200,14 @@ void VDG::chainContraction(const NodeVector* seeds)
         if (!xNode->getSingleOutEdge(y, isVirtual) || isVirtual)
             return false;
 
-        // 由于(x,y)合并只改变他们前驱交集的属性（出边集合）和自己的属性
         VDGNode* yNode = getNode(y);
-        if(xNode->inSolidDegree()>=yNode->inSolidDegree())
+        if (xNode->inSolidDegree() >= yNode->inSolidDegree())
             enqueueInNeighbors(y);
         else
             enqueueInNeighbors(x);
-
         NodeVector toMerge = {x};
-        mergeVersionsIntoRep(toMerge, y);
-        // enqueueInNeighbors(y);
-        enqueue(y);
+        const Version rep = mergeVersionsIntoRep(toMerge, y);
+        enqueue(rep);
         return true;
     };
 
@@ -1197,15 +1223,13 @@ void VDG::chainContraction(const NodeVector* seeds)
             return false;
 
         VDGNode* xNode = getNode(x);
-        if(xNode->outSolidDegree()>=yNode->outSolidDegree())
+        if (xNode->outSolidDegree() >= yNode->outSolidDegree())
             enqueueOutNeighbors(y);
         else
             enqueueOutNeighbors(x);
-
         NodeVector toMerge = {y};
-        mergeVersionsIntoRep(toMerge, x);
-        // enqueueOutNeighbors(x);
-        enqueue(x);
+        const Version rep = mergeVersionsIntoRep(toMerge, x);
+        enqueue(rep);
         return true;
     };
 

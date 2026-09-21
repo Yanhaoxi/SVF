@@ -39,8 +39,8 @@ cmake -S . -B Release-build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang-16 \
   -DCMAKE_CXX_COMPILER=clang++-16 \
-  -DCMAKE_CXX_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11" \
-  -DCMAKE_C_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11" \
+  -DCMAKE_CXX_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13" \
+  -DCMAKE_C_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13" \
   -DSVF_WARN_AS_ERROR=OFF \
   -DLLVM_DIR=$LLVM_DIR
 
@@ -57,7 +57,10 @@ Artifacts: `Release-build/bin/wpa` and friends, libraries under
   (`/usr/lib/llvm-16/lib/cmake/llvm`) instead.
 - If clang picks up a very new libstdc++ (e.g. GCC 16 headers) the build fails
   with `__normal_iterator ... incomplete type`. Pin the standard library with
-  `--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11` (or use `g++-11`).
+  `--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13` (or use `g++-13`).
+  Use **GCC 13** here to match `code/svf` (`code/svf/BUILD.md`), so the LOPA
+  binary and the SFS/VSFS binary are compiled against the same libstdc++ and
+  the timing comparison is not confounded by the standard library version.
 - `SVF_WARN_AS_ERROR` defaults to `ON`; on newer compilers set it to `OFF` to
   avoid unrelated `-Werror` failures.
 - `extapi.bc` is located relative to the build tree. When running a binary from

@@ -334,7 +334,7 @@ public:
     inline const NodeVector& getUpdatedNodes() const { return updatedNodes_; }
 
     // --- Merge / simplify ---
-    void mergeVersionsIntoRep(const NodeVector& versions, Version repVer);
+    Version mergeVersionsIntoRep(const NodeVector& versions, Version repVer);
     NodeVector sccMergeSolidEdges(const NodeVector& candidates = NodeVector());
     void propagateInTopoOrder(PropagateCallback propagate, StmtRelianceCallback onChanged);
 

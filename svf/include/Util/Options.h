@@ -118,6 +118,7 @@ public:
     static const Option<std::string> VDGPassProfile;
     static const Option<bool> LOPAObjFSLowerBound;
     static const Option<bool> LOPANoOffline;
+    static const Option<bool> LOPANoDSU;
     static const Option<bool> LOPANoLoadCache;
 
     // Base class of pointer analyses (PointerAnalysis.cpp)

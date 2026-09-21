@@ -11,10 +11,12 @@
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <queue>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -213,11 +215,18 @@ namespace
         bool inserted = false;
         if (isVirtual)
         {
+            // must \sqcup may = must: a may edge never coexists with a must edge
+            // between the same endpoints.
+            if (srcNode.solidOut.find(dst) != srcNode.solidOut.end())
+                return false;
             inserted = srcNode.virtualOut.insert(dst).second;
             dstNode.virtualIn.insert(src);
         }
         else
         {
+            // A must edge subsumes an existing may edge between the same endpoints.
+            srcNode.virtualOut.erase(dst);
+            dstNode.virtualIn.erase(src);
             inserted = srcNode.solidOut.insert(dst).second;
             dstNode.solidIn.insert(src);
         }
@@ -650,6 +659,19 @@ namespace
         return n;
     }
 
+    // Nodes that are neither a load-consume nor a store-yield endpoint, i.e. the
+    // relay/internal states that compression aims to quotient away.
+    inline u64_t countPlainNodes(const ProfileGraph &g)
+    {
+        u64_t n = 0;
+        for (const auto &kn : g.nodes)
+        {
+            if (!kn.second.loadConsume && !kn.second.storeYield)
+                ++n;
+        }
+        return n;
+    }
+
     void removeProfileNode(ProfileGraph &g, const ProfileKey key)
     {
         const auto it = g.nodes.find(key);
@@ -707,14 +729,21 @@ namespace
                 if (nd == rep)
                     continue;
                 repNode.solidOut.insert(nd);
+                repNode.virtualOut.erase(nd);
                 const auto d = g.nodes.find(nd);
                 if (d != g.nodes.end())
+                {
                     d->second.solidIn.insert(rep);
+                    d->second.virtualIn.erase(rep);
+                }
             }
             for (const ProfileKey dst : mn.virtualOut)
             {
                 const ProfileKey nd = (dst == m) ? rep : dst;
                 if (nd == rep)
+                    continue;
+                // must \sqcup may = must: a must edge subsumes a may edge.
+                if (repNode.solidOut.find(nd) != repNode.solidOut.end())
                     continue;
                 repNode.virtualOut.insert(nd);
                 const auto d = g.nodes.find(nd);
@@ -728,13 +757,20 @@ namespace
                     continue;
                 const auto s = g.nodes.find(ns);
                 if (s != g.nodes.end())
+                {
                     s->second.solidOut.insert(rep);
+                    s->second.virtualOut.erase(rep);
+                }
                 repNode.solidIn.insert(ns);
+                repNode.virtualIn.erase(ns);
             }
             for (const ProfileKey src : mn.virtualIn)
             {
                 const ProfileKey ns = (src == m) ? rep : src;
                 if (ns == rep)
+                    continue;
+                // must \sqcup may = must: a must edge subsumes a may edge.
+                if (repNode.solidIn.find(ns) != repNode.solidIn.end())
                     continue;
                 const auto s = g.nodes.find(ns);
                 if (s != g.nodes.end())
@@ -932,8 +968,20 @@ namespace
                 enqueue(dst);
         };
 
-        for (const auto &kn : g.nodes)
-            enqueue(kn.first);
+        {
+            std::vector<ProfileKey> seedKeys;
+            seedKeys.reserve(g.nodes.size());
+            for (const auto &kn : g.nodes)
+                seedKeys.push_back(kn.first);
+            if (const char *shuffleSeed = std::getenv("LOPA_CHAIN_SHUFFLE"))
+            {
+                std::mt19937 rng(static_cast<std::mt19937::result_type>(
+                    std::strtoul(shuffleSeed, nullptr, 10)));
+                std::shuffle(seedKeys.begin(), seedKeys.end(), rng);
+            }
+            for (const ProfileKey key : seedKeys)
+                enqueue(key);
+        }
 
         while (!worklist.empty())
         {
@@ -1180,9 +1228,9 @@ namespace
     struct ProfileSweepMetrics
     {
         u64_t graphs = 0;
-        u64_t n0Nodes = 0, n0Solid = 0, n0Virtual = 0;
-        u64_t n1Nodes = 0, n1Solid = 0, n1Virtual = 0;
-        std::vector<u64_t> passNodes, passSolid, passVirtual;
+        u64_t n0Nodes = 0, n0Solid = 0, n0Virtual = 0, n0Plain = 0;
+        u64_t n1Nodes = 0, n1Solid = 0, n1Virtual = 0, n1Plain = 0;
+        std::vector<u64_t> passNodes, passSolid, passVirtual, passPlain;
         std::vector<double> passSeconds;
         // Merge-class size distribution (how many N0 nodes each surviving rep absorbs).
         Map<u64_t, u64_t> classSizeHist;
@@ -1296,9 +1344,11 @@ namespace
             << " n0_nodes:" << m.n0Nodes
             << " n0_solid:" << m.n0Solid
             << " n0_virtual:" << m.n0Virtual
+            << " n0_plain:" << m.n0Plain
             << " n1_nodes:" << m.n1Nodes
             << " n1_solid:" << m.n1Solid
             << " n1_virtual:" << m.n1Virtual
+            << " n1_plain:" << m.n1Plain
             << " maxClassSize:" << m.maxClassSize
             << " time:" << totalTime
             << "\n";
@@ -1339,6 +1389,7 @@ namespace
                 << " nodes:" << m.passNodes[i]
                 << " solid:" << m.passSolid[i]
                 << " virtual:" << m.passVirtual[i]
+                << " plain:" << m.passPlain[i]
                 << " time:" << m.passSeconds[i]
                 << "\n";
         }
@@ -1354,7 +1405,7 @@ void runSVFGPassProfiling(const LOPA &pta, const SVFG *svfg)
         Map<NodeID, ProfileGraph> objGraphs;
         Map<NodeID, NodeVector> deltaSrcCacheByDst;
         SVFG *mutableSVFG = const_cast<SVFG *>(svfg);
-        CallGraph *cg = pta.getCallGraph();
+        CallGraph *cg = svfg->getCallGraph();
 
         auto nonStrongUpdateObj = [&pta](const NodeID o) -> bool
         {
@@ -1574,20 +1625,26 @@ void runSVFGPassProfiling(const LOPA &pta, const SVFG *svfg)
             }
 
             // Add store C->Y edges with existing virtual/solid logic.
+            // Mirror the real builder: a store yields (and gets a C->Y edge)
+            // only when it actually appears as a yield endpoint in this object's
+            // footprint (VDG::touchedYieldLocs). Stores that only appear as a
+            // StoreConsume endpoint must not gain a synthetic yield node/edge.
             for (Map<NodeID, ProfileGraph>::value_type &entry : objGraphs)
             {
                 const NodeID o = entry.first;
                 ProfileGraph &g = entry.second;
-                Set<NodeID> storeStmtIds;
+                Set<NodeID> storeYieldStmtIds;
                 for (const auto &kn : g.nodes)
                 {
+                    if (getRoleFromProfileKey(kn.first) != ProfileNodeRole::StoreYield)
+                        continue;
                     const NodeID stmtId = getStmtIdFromProfileKey(kn.first);
                     if (pta.isStore(stmtId))
-                        storeStmtIds.insert(stmtId);
+                        storeYieldStmtIds.insert(stmtId);
                 }
 
                 const bool keepVirtualStoreCY = !useFSLowerBound || !nonStrongUpdateObj(o);
-                for (const NodeID storeStmt : storeStmtIds)
+                for (const NodeID storeStmt : storeYieldStmtIds)
                 {
                     const ProfileKey cKey = makeProfileKey(storeStmt, ProfileNodeRole::StoreConsume);
                     const ProfileKey yKey = makeProfileKey(storeStmt, ProfileNodeRole::StoreYield);
@@ -1655,6 +1712,7 @@ void runSVFGPassProfiling(const LOPA &pta, const SVFG *svfg)
                 metrics.passNodes.assign(order.size(), 0);
                 metrics.passSolid.assign(order.size(), 0);
                 metrics.passVirtual.assign(order.size(), 0);
+                metrics.passPlain.assign(order.size(), 0);
                 metrics.passSeconds.assign(order.size(), 0.0);
 
                 for (const Map<NodeID, ProfileGraph>::value_type &entry : objGraphs)
@@ -1664,6 +1722,7 @@ void runSVFGPassProfiling(const LOPA &pta, const SVFG *svfg)
                     metrics.n0Nodes += static_cast<u64_t>(work.nodes.size());
                     metrics.n0Solid += countSolidEdges(work);
                     metrics.n0Virtual += countVirtualEdges(work);
+                    metrics.n0Plain += countPlainNodes(work);
 
                     for (size_t i = 0; i < order.size(); ++i)
                     {
@@ -1675,11 +1734,13 @@ void runSVFGPassProfiling(const LOPA &pta, const SVFG *svfg)
                         metrics.passNodes[i] += static_cast<u64_t>(work.nodes.size());
                         metrics.passSolid[i] += countSolidEdges(work);
                         metrics.passVirtual[i] += countVirtualEdges(work);
+                        metrics.passPlain[i] += countPlainNodes(work);
                     }
 
                     metrics.n1Nodes += static_cast<u64_t>(work.nodes.size());
                     metrics.n1Solid += countSolidEdges(work);
                     metrics.n1Virtual += countVirtualEdges(work);
+                    metrics.n1Plain += countPlainNodes(work);
 
                     for (const auto &kn : work.nodes)
                     {
