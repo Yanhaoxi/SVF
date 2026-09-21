@@ -62,6 +62,16 @@ public:
         return ptCache.getActualPts(id);
     }
 
+    /// Non-inserting lookup: returns nullptr when var has no points-to entry.
+    /// Unlike getPts(), it never materializes an empty set for absent keys.
+    inline const DataSet* getPtsIfExists(const Key &var)
+    {
+        typename KeyToIDMap::iterator it = ptsMap.find(var);
+        if (it == ptsMap.end())
+            return nullptr;
+        return &ptCache.getActualPts(it->second);
+    }
+
     inline const KeySet& getRevPts(const Data &data) override
     {
         assert(this->rev && "PersistentPTData::getRevPts: constructed without reverse PT support!");
@@ -830,6 +840,10 @@ public:
     const DataSet &getPts(const VersionedKey& vk) override
     {
         return atPTData.getPts(vk);
+    }
+    const DataSet* getPtsIfExists(const VersionedKey& vk) override
+    {
+        return atPTData.getPtsIfExists(vk);
     }
 
     const KeySet& getRevPts(const Data &data) override

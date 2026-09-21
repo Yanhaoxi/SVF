@@ -224,17 +224,18 @@ void LOPAStat::versionStat(void)
                 ++_NumVersions;
 
                 // If the version was just over-approximate and never accessed, ignore.
-                // TODO: with vPtD changed there is no interface to check if the PTS
-                //       exists; an emptiness check is *not* an existence check.
-                if (lopa->vPtD->getPts(lopa->atKey(o, v)).empty()) continue;
+                // Use a non-inserting query so absent versions do not materialize
+                // empty points-to entries in the backing store.
+                const PointsTo *ovPtsPtr = lopa->vPtD->getPtsIfExists(lopa->atKey(o, v));
+                if (ovPtsPtr == nullptr || ovPtsPtr->empty()) continue;
 
-                const PointsTo &ovPts = lopa->vPtD->getPts(lopa->atKey(o, v));
-                if (!ovPts.empty()) ++_NumNonEmptyVersions;
-                else ++_NumEmptyVersions;
+                const PointsTo &ovPts = *ovPtsPtr;
+                ++_NumNonEmptyVersions;
 
-                _TotalPtsSize += ovPts.count();
-                totalVersionPtsSize += ovPts.count();
-                if (ovPts.count() > _MaxVersionPtsSize) _MaxVersionPtsSize = ovPts.count();
+                const u32_t ovPtsCount = static_cast<u32_t>(ovPts.count());
+                _TotalPtsSize += ovPtsCount;
+                totalVersionPtsSize += ovPtsCount;
+                if (ovPtsCount > _MaxVersionPtsSize) _MaxVersionPtsSize = ovPtsCount;
             }
         }
     }

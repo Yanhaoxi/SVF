@@ -1030,7 +1030,13 @@ void LOPA::buildVDG(void)
     ctx.passTicks.assign(passes.size(), 0.0);
 
     const NodeVector emptyStartingNodes;
-    for (const NodeID o : prelabeledObjects)
+    // Iterate objects in ascending NodeID order. step1 tests every reached
+    // node's indirect in-edge NodeBS against the current object; a sorted object
+    // order lets each bitset's sparse lookup cache advance monotonically instead
+    // of thrashing, without changing any per-object result.
+    NodeVector objects(prelabeledObjects.begin(), prelabeledObjects.end());
+    std::sort(objects.begin(), objects.end());
+    for (const NodeID o : objects)
     {
         const Map<NodeID, NodeVector>::const_iterator startsIt = objStartingNodes.find(o);
         const NodeVector &osStartingNodes

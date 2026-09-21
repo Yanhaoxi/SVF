@@ -373,7 +373,7 @@ private:
     /// Edge internals
     bool addEdgeInternal(Version srcRep, Version dstRep, bool isVirtual);
     void removeAllVirtualEdges();
-    void moveEdgesToRep(Version sub, Version rep);
+    void moveEdgesToRep(Version sub, Version rep, const NodeBS& mergeSet);
 
     void removeNodeAndEdges(Version repV);
     void deleteNode(Version repV);

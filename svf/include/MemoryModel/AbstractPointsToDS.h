@@ -277,6 +277,9 @@ public:
     virtual ~VersionedPTData() { }
 
     virtual const DataSet& getPts(const VersionedKey& vk) = 0;
+    /// Non-inserting variant of getPts(const VersionedKey&): returns nullptr when
+    /// vk has no points-to entry, instead of materializing an empty set.
+    virtual const DataSet* getPtsIfExists(const VersionedKey& vk) = 0;
     virtual const VersionedKeySet& getVersionedKeyRevPts(const Data& datum) = 0;
 
     virtual bool addPts(const VersionedKey& vk, const Data& element) = 0;
