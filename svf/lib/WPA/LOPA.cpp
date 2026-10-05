@@ -218,6 +218,19 @@ void LOPA::removeAllIndirectSVFGEdges(void)
 
 void LOPA::solveWorklist()
 {
+    // FlowSensitive refreshes callGraphSCC before each solve round. An indirect
+    // call can make a stack object's function recursive without changing the
+    // store's operands. Revisit such stores so their formerly strong updates
+    // become weak and activate the pending consume -> yield edges.
+    for (const auto &entry : pendingStoreObjsByLoc)
+    {
+        const auto *store = SVFUtil::cast<StoreSVFGNode>(svfg->getSVFGNode(entry.first));
+        NodeID singleton = 0;
+        if (!getPts(store->getPAGDstNodeID()).empty()
+                && !isStrongUpdate(store, singleton))
+            pushIntoWorklist(entry.first);
+    }
+
     // Main solving loop: alternate between stmt worklist and version propagation
     // Uses priority-based processing: addr/load nodes first, then others, then stores last
     bool changed = true;

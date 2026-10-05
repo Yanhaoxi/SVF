@@ -204,14 +204,17 @@ namespace
         return node;
     }
 
-    inline bool addProfileEdge(ProfileGraph &graph,
-                               const ProfileKey src,
-                               const ProfileKey dst,
-                               const bool isVirtual,
-                               const SVFG *svfg)
+    inline bool insertProfileEdge(ProfileGraph &graph,
+                                  const ProfileKey src,
+                                  const ProfileKey dst,
+                                  const bool isVirtual)
     {
-        ProfileNode &srcNode = getOrCreateProfileNode(graph, src, svfg);
-        ProfileNode &dstNode = getOrCreateProfileNode(graph, dst, svfg);
+        // Match VDG::addEdge: self-loops do not represent a dependence between
+        // distinct states. Counting them in the degrees can block ChainFwd/Bwd.
+        if (src == dst)
+            return false;
+        ProfileNode &srcNode = graph.nodes.at(src);
+        ProfileNode &dstNode = graph.nodes.at(dst);
         bool inserted = false;
         if (isVirtual)
         {
@@ -231,6 +234,18 @@ namespace
             dstNode.solidIn.insert(src);
         }
         return inserted;
+    }
+
+    inline bool addProfileEdge(ProfileGraph &graph,
+                               const ProfileKey src,
+                               const ProfileKey dst,
+                               const bool isVirtual,
+                               const SVFG *svfg)
+    {
+        // Preserve the raw node population, including isolated endpoints.
+        getOrCreateProfileNode(graph, src, svfg);
+        getOrCreateProfileNode(graph, dst, svfg);
+        return insertProfileEdge(graph, src, dst, isVirtual);
     }
 
     void printSortedPatternCounts(const std::string &prefix,
