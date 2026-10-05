@@ -1,7 +1,7 @@
-//===- VersionedFlowSensitiveStat.cpp -- Statistics for VFSPTA -//
+//===- Stat.cpp -- Statistics for LOPA -//
 
 /*
- * VersionedFlowSensitiveStat.cpp
+ * Stat.cpp
  *
  *  Created on: 25/07/2020
  *      Author: mbarbar
@@ -9,13 +9,13 @@
 
 #include "Util/SVFUtil.h"
 #include "WPA/WPAStat.h"
-#include "WPA/VersionedFlowSensitive.h"
+#include "WPA/LOPA.h"
 #include "MemoryModel/PointsTo.h"
 
 using namespace SVF;
 using namespace SVFUtil;
 
-void VersionedFlowSensitiveStat::clearStat()
+void LOPAStat::clearStat()
 {
     _NumVersions         = 0;
     _MaxVersions         = 0;
@@ -37,16 +37,16 @@ void VersionedFlowSensitiveStat::clearStat()
     _MaxEquivClassSize   = 0;
 }
 
-void VersionedFlowSensitiveStat::performStat()
+void LOPAStat::performStat()
 {
     // Largely based on that in FlowSensitiveStat. Would be better to split the FSStat version
     // and reuse code rather than copy.
-    assert(SVFUtil::isa<VersionedFlowSensitive>(vfspta) && "VFSStat::performStat: not given VFSPTA.");
+    assert(SVFUtil::isa<LOPA>(lopa) && "LOPAStat::performStat: not given LOPA.");
     endClk();
 
     clearStat();
 
-    SVFIR *pag = vfspta->getPAG();
+    SVFIR *pag = lopa->getPAG();
 
     versionStat();
     ptsSizeStat();
@@ -76,7 +76,7 @@ void VersionedFlowSensitiveStat::performStat()
 
     unsigned numOfCopy = 0;
     unsigned numOfStore = 0;
-    for (SVFG::iterator it = vfspta->svfg->begin(); it != vfspta->svfg->end(); ++it)
+    for (SVFG::iterator it = lopa->svfg->begin(); it != lopa->svfg->end(); ++it)
     {
         SVFGNode* svfgNode = it->second;
         if (SVFUtil::isa<CopySVFGNode>(svfgNode)) numOfCopy++;
@@ -86,23 +86,23 @@ void VersionedFlowSensitiveStat::performStat()
     PTAStat::performStat();
 
     timeStatMap["TotalTime"]    = (endTime - startTime)/TIMEINTERVAL;
-    timeStatMap["SolveTime"]          = vfspta->solveTime;
-    timeStatMap["SCCTime"]            = vfspta->sccTime;
-    timeStatMap["ProcessTime"]        = vfspta->processTime;
-    timeStatMap["PropagationTime"]    = vfspta->propagationTime;
-    timeStatMap["DirectPropaTime"]    = vfspta->directPropaTime;
-    timeStatMap["IndirectPropaTime"]  = vfspta->indirectPropaTime;
-    timeStatMap["Strong/WeakUpdTime"] = vfspta->updateTime;
-    timeStatMap["AddrTime"]           = vfspta->addrTime;
-    timeStatMap["CopyTime"]           = vfspta->copyTime;
-    timeStatMap["GepTime"]            = vfspta->gepTime;
-    timeStatMap["LoadTime"]           = vfspta->loadTime;
-    timeStatMap["StoreTime"]          = vfspta->storeTime;
-    timeStatMap["UpdateCGTime"]       = vfspta->updateCallGraphTime;
-    timeStatMap["PhiTime"]            = vfspta->phiTime;
-    timeStatMap["PrelabelingTime"]    = vfspta->prelabelingTime;
-    timeStatMap["VersionPropTime"]    = vfspta->versionPropTime;
-    timeStatMap["VDGBuildTime"]       = vfspta->vdgBuildTime;
+    timeStatMap["SolveTime"]          = lopa->solveTime;
+    timeStatMap["SCCTime"]            = lopa->sccTime;
+    timeStatMap["ProcessTime"]        = lopa->processTime;
+    timeStatMap["PropagationTime"]    = lopa->propagationTime;
+    timeStatMap["DirectPropaTime"]    = lopa->directPropaTime;
+    timeStatMap["IndirectPropaTime"]  = lopa->indirectPropaTime;
+    timeStatMap["Strong/WeakUpdTime"] = lopa->updateTime;
+    timeStatMap["AddrTime"]           = lopa->addrTime;
+    timeStatMap["CopyTime"]           = lopa->copyTime;
+    timeStatMap["GepTime"]            = lopa->gepTime;
+    timeStatMap["LoadTime"]           = lopa->loadTime;
+    timeStatMap["StoreTime"]          = lopa->storeTime;
+    timeStatMap["UpdateCGTime"]       = lopa->updateCallGraphTime;
+    timeStatMap["PhiTime"]            = lopa->phiTime;
+    timeStatMap["PrelabelingTime"]    = lopa->prelabelingTime;
+    timeStatMap["VersionPropTime"]    = lopa->versionPropTime;
+    timeStatMap["VDGBuildTime"]       = lopa->vdgBuildTime;
 
     PTNumStatMap["TotalPointers"]  = pag->getValueNodeNum();
     PTNumStatMap["TotalObjects"]   = pag->getObjectNodeNum();
@@ -127,13 +127,13 @@ void VersionedFlowSensitiveStat::performStat()
     PTNumStatMap["CopysNum"]  = numOfCopy;
     PTNumStatMap["StoresNum"] = numOfStore;
 
-    PTNumStatMap["SolveIterations"] = vfspta->numOfIteration;
+    PTNumStatMap["SolveIterations"] = lopa->numOfIteration;
 
-    PTNumStatMap["IndEdgeSolved"] = vfspta->getNumOfResolvedIndCallEdge();
+    PTNumStatMap["IndEdgeSolved"] = lopa->getNumOfResolvedIndCallEdge();
 
-    PTNumStatMap["StrongUpdates"] = vfspta->svfgHasSU.count();
-    PTNumStatMap["PrelabelNodes"] = vfspta->numPrelabelNodes;
-    PTNumStatMap["PrelabelFIObjs"] = vfspta->numPrelabelFIObjs;
+    PTNumStatMap["StrongUpdates"] = lopa->svfgHasSU.count();
+    PTNumStatMap["PrelabelNodes"] = lopa->numPrelabelNodes;
+    PTNumStatMap["PrelabelFIObjs"] = lopa->numPrelabelFIObjs;
 
     PTNumStatMap["MaxPtsSize"]        = _MaxPtsSize;
     PTNumStatMap["MaxTopLvlPtsSize"]  = _MaxTopLvlPtsSize;
@@ -143,26 +143,26 @@ void VersionedFlowSensitiveStat::performStat()
     timeStatMap["AvgTopLvlPtsSize"]  = _AvgTopLvlPtsSize;
     timeStatMap["AvgVersionPtsSize"] = _AvgVersionPtsSize;
 
-    PTNumStatMap["ProcessedAddr"]     = vfspta->numOfProcessedAddr;
-    PTNumStatMap["ProcessedCopy"]     = vfspta->numOfProcessedCopy;
-    PTNumStatMap["ProcessedGep"]      = vfspta->numOfProcessedGep;
-    PTNumStatMap["ProcessedLoad"]     = vfspta->numOfProcessedLoad;
-    PTNumStatMap["ProcessedStore"]    = vfspta->numOfProcessedStore;
-    PTNumStatMap["ProcessedPhi"]      = vfspta->numOfProcessedPhi;
-    PTNumStatMap["ProcessedAParam"]   = vfspta->numOfProcessedActualParam;
-    PTNumStatMap["ProcessedFRet"]     = vfspta->numOfProcessedFormalRet;
-    PTNumStatMap["ProcessedMSSANode"] = vfspta->numOfProcessedMSSANode;
+    PTNumStatMap["ProcessedAddr"]     = lopa->numOfProcessedAddr;
+    PTNumStatMap["ProcessedCopy"]     = lopa->numOfProcessedCopy;
+    PTNumStatMap["ProcessedGep"]      = lopa->numOfProcessedGep;
+    PTNumStatMap["ProcessedLoad"]     = lopa->numOfProcessedLoad;
+    PTNumStatMap["ProcessedStore"]    = lopa->numOfProcessedStore;
+    PTNumStatMap["ProcessedPhi"]      = lopa->numOfProcessedPhi;
+    PTNumStatMap["ProcessedAParam"]   = lopa->numOfProcessedActualParam;
+    PTNumStatMap["ProcessedFRet"]     = lopa->numOfProcessedFormalRet;
+    PTNumStatMap["ProcessedMSSANode"] = lopa->numOfProcessedMSSANode;
 
-    PTNumStatMap["NumOfNodesInSCC"] = vfspta->numOfNodesInSCC;
-    PTNumStatMap["MaxSCCSize"]      = vfspta->maxSCCSize;
-    PTNumStatMap["NumOfSCC"]        = vfspta->numOfSCC;
-    timeStatMap["AverageSCCSize"]   = (vfspta->numOfSCC == 0) ? 0 :
-                                      ((double)vfspta->numOfNodesInSCC / vfspta->numOfSCC);
+    PTNumStatMap["NumOfNodesInSCC"] = lopa->numOfNodesInSCC;
+    PTNumStatMap["MaxSCCSize"]      = lopa->maxSCCSize;
+    PTNumStatMap["NumOfSCC"]        = lopa->numOfSCC;
+    timeStatMap["AverageSCCSize"]   = (lopa->numOfSCC == 0) ? 0 :
+                                      ((double)lopa->numOfNodesInSCC / lopa->numOfSCC);
 
     PTAStat::printStat("Versioned Flow-Sensitive Pointer Analysis Statistics");
 }
 
-void VersionedFlowSensitiveStat::versionStat(void)
+void LOPAStat::versionStat(void)
 {
     // TODO! Need to merge yield/consume.
     _NumSingleVersion = 0;
@@ -171,31 +171,31 @@ void VersionedFlowSensitiveStat::versionStat(void)
     // Build per-object unique-version cardinality across consume/yield maps.
     // This fixes MaxVersionsForObj (and TotalSingleVObjs) being stuck at 0.
     Set<NodeID> objects;
-    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ovm : vfspta->consume)
+    for (const LOPA::ObjToLocVersionMap::value_type &ovm : lopa->consume)
         if (ovm.second) objects.insert(ovm.first);
-    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ovm : vfspta->yield)
+    for (const LOPA::ObjToLocVersionMap::value_type &ovm : lopa->yield)
         if (ovm.second) objects.insert(ovm.first);
 
     for (const NodeID o : objects)
     {
         Set<Version> objVersions;
 
-        const VersionedFlowSensitive::ObjToLocVersionMap::const_iterator cIt = vfspta->consume.find(o);
-        if (cIt != vfspta->consume.end() && cIt->second)
+        const LOPA::ObjToLocVersionMap::const_iterator cIt = lopa->consume.find(o);
+        if (cIt != lopa->consume.end() && cIt->second)
         {
-            for (const VersionedFlowSensitive::LocToVersionMap::value_type &lv : *(cIt->second))
+            for (const LOPA::LocToVersionMap::value_type &lv : *(cIt->second))
             {
-                if (lv.second != VersionedFlowSensitive::invalidVersion)
+                if (lv.second != LOPA::invalidVersion)
                     objVersions.insert(lv.second);
             }
         }
 
-        const VersionedFlowSensitive::ObjToLocVersionMap::const_iterator yIt = vfspta->yield.find(o);
-        if (yIt != vfspta->yield.end() && yIt->second)
+        const LOPA::ObjToLocVersionMap::const_iterator yIt = lopa->yield.find(o);
+        if (yIt != lopa->yield.end() && yIt->second)
         {
-            for (const VersionedFlowSensitive::LocToVersionMap::value_type &lv : *(yIt->second))
+            for (const LOPA::LocToVersionMap::value_type &lv : *(yIt->second))
             {
-                if (lv.second != VersionedFlowSensitive::invalidVersion)
+                if (lv.second != LOPA::invalidVersion)
                     objVersions.insert(lv.second);
             }
         }
@@ -208,33 +208,34 @@ void VersionedFlowSensitiveStat::versionStat(void)
     }
 
     u32_t totalVersionPtsSize = 0;
-    for (const VersionedFlowSensitive::ObjToLocVersionMap *lvm :
+    for (const LOPA::ObjToLocVersionMap *lvm :
             {
-                &vfspta->consume, &vfspta->yield
+                &lopa->consume, &lopa->yield
             })
     {
-        for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ovm : *lvm)
+        for (const LOPA::ObjToLocVersionMap::value_type &ovm : *lvm)
         {
             const NodeID o = ovm.first;
             if (!ovm.second) continue;
-            for (const VersionedFlowSensitive::LocToVersionMap::value_type &lv : *(ovm.second))
+            for (const LOPA::LocToVersionMap::value_type &lv : *(ovm.second))
             {
                 const Version v = lv.second;
 
                 ++_NumVersions;
 
                 // If the version was just over-approximate and never accessed, ignore.
-                // TODO: with vPtD changed there is no interface to check if the PTS
-                //       exists; an emptiness check is *not* an existence check.
-                if (vfspta->vPtD->getPts(vfspta->atKey(o, v)).empty()) continue;
+                // Use a non-inserting query so absent versions do not materialize
+                // empty points-to entries in the backing store.
+                const PointsTo *ovPtsPtr = lopa->vPtD->getPtsIfExists(lopa->atKey(o, v));
+                if (ovPtsPtr == nullptr || ovPtsPtr->empty()) continue;
 
-                const PointsTo &ovPts = vfspta->vPtD->getPts(vfspta->atKey(o, v));
-                if (!ovPts.empty()) ++_NumNonEmptyVersions;
-                else ++_NumEmptyVersions;
+                const PointsTo &ovPts = *ovPtsPtr;
+                ++_NumNonEmptyVersions;
 
-                _TotalPtsSize += ovPts.count();
-                totalVersionPtsSize += ovPts.count();
-                if (ovPts.count() > _MaxVersionPtsSize) _MaxVersionPtsSize = ovPts.count();
+                const u32_t ovPtsCount = static_cast<u32_t>(ovPts.count());
+                _TotalPtsSize += ovPtsCount;
+                totalVersionPtsSize += ovPtsCount;
+                if (ovPtsCount > _MaxVersionPtsSize) _MaxVersionPtsSize = ovPtsCount;
             }
         }
     }
@@ -246,19 +247,19 @@ void VersionedFlowSensitiveStat::versionStat(void)
     _TotalPtsSize += totalVersionPtsSize;
 }
 
-void VersionedFlowSensitiveStat::ptsSizeStat()
+void LOPAStat::ptsSizeStat()
 {
     u32_t totalValidTopLvlPointers = 0;
     u32_t totalTopLvlPtsSize = 0;
-    for (SVFIR::iterator it = vfspta->getPAG()->begin(); it != vfspta->getPAG()->end(); ++it)
+    for (SVFIR::iterator it = lopa->getPAG()->begin(); it != lopa->getPAG()->end(); ++it)
     {
-        if (!vfspta->getPAG()->isValidTopLevelPtr(it->second)) continue;
+        if (!lopa->getPAG()->isValidTopLevelPtr(it->second)) continue;
 
         NodeID p = it->first;
 
         totalValidTopLvlPointers++;
 
-        u32_t size = vfspta->getPts(p).count();
+        u32_t size = lopa->getPts(p).count();
         totalTopLvlPtsSize += size;
         if (size > _MaxTopLvlPtsSize) _MaxTopLvlPtsSize = size;
     }
@@ -275,13 +276,13 @@ void VersionedFlowSensitiveStat::ptsSizeStat()
     _MaxPtsSize = _MaxVersionPtsSize > _MaxTopLvlPtsSize ? _MaxVersionPtsSize : _MaxTopLvlPtsSize;
 }
 
-void VersionedFlowSensitiveStat::equivalentObjStat(void)
+void LOPAStat::equivalentObjStat(void)
 {
     // Equivalent-object dedup is disabled: each materialized object is its own class.
     Set<NodeID> objects;
-    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ov : vfspta->consume)
+    for (const LOPA::ObjToLocVersionMap::value_type &ov : lopa->consume)
         objects.insert(ov.first);
-    for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ov : vfspta->yield)
+    for (const LOPA::ObjToLocVersionMap::value_type &ov : lopa->yield)
         objects.insert(ov.first);
 
     const u32_t total = static_cast<u32_t>(objects.size());

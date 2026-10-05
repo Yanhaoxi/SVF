@@ -1,7 +1,7 @@
-//===- VersionedFlowSensitive.cpp -- Versioned flow-sensitive pointer analysis------------//
+//===- LOPA.cpp -- load-observable versioned flow-sensitive pointer analysis --//
 
 /*
- * VersionedFlowSensitive.cpp
+ * LOPA.cpp
  *
  *  Created on: Jun 26, 2020
  *      Author: Mohamad Barbar
@@ -9,7 +9,7 @@
 
 #include "Util/GeneralType.h"
 #include "WPA/Andersen.h"
-#include "WPA/VersionedFlowSensitive.h"
+#include "WPA/LOPA.h"
 #include "Util/Options.h"
 #include "MemoryModel/PointsTo.h"
 #include <algorithm>
@@ -23,34 +23,33 @@
 
 using namespace SVF;
 
-const Version VersionedFlowSensitive::invalidVersion = 0;
-VersionedFlowSensitive *VersionedFlowSensitive::vfspta = nullptr;
+const Version LOPA::invalidVersion = 0;
+LOPA *LOPA::lopa = nullptr;
 
-VersionedVar VersionedFlowSensitive::atKey(NodeID var, Version version)
+VersionedVar LOPA::atKey(NodeID var, Version version)
 {
-    assert(version != invalidVersion && "VersionedFlowSensitive::atKey: trying to use an invalid version!");
+    assert(version != invalidVersion && "LOPA::atKey: trying to use an invalid version!");
     return std::make_pair(var, version);
 }
 
-VersionedFlowSensitive::VersionedFlowSensitive(SVFIR *_pag, PTATY type)
+LOPA::LOPA(SVFIR *_pag, PTATY type)
     : FlowSensitive(_pag, type)
 {
-    numPrelabelVersions = 0;
     numPrelabelNodes = 0;
     numPrelabelFIObjs = 0;
     prelabelingTime = versionPropTime = vdgBuildTime = 0.0;
     // We'll grab vPtD in initialize.
 
-    assert(!Options::OPTSVFG() && "VFS: -opt-svfg not currently supported with VFS.");
+    assert(!Options::OPTSVFG() && "LOPA: -opt-svfg not currently supported with LOPA.");
 }
 
-void VersionedFlowSensitive::initialize()
+void LOPA::initialize()
 {
     FlowSensitive::initialize();
     VDG::setSolvePhaseStarted(false);
     // Overwrite the stat FlowSensitive::initialize gave us.
     delete stat;
-    stat = new VersionedFlowSensitiveStat(this);
+    stat = new LOPAStat(this);
 
     vPtD = getVersionedPTDataTy();
     buildIsStoreLoadMaps();
@@ -62,7 +61,7 @@ void VersionedFlowSensitive::initialize()
     prelabel();
     // Build VDGs in object-major streaming mode (includes simplify + stmt-reliance bind).
     buildVDG();
-    if (Options::VDGPassProfile())
+    if (!Options::VDGPassProfile().empty())
         return;
 
     if (Options::DumpVDG())
@@ -81,14 +80,14 @@ void VersionedFlowSensitive::initialize()
     removeAllIndirectSVFGEdges();
 }
 
-void VersionedFlowSensitive::solveConstraints()
+void LOPA::solveConstraints()
 {
-    if (Options::VDGPassProfile())
+    if (!Options::VDGPassProfile().empty())
         return;
     FlowSensitive::solveConstraints();
 }
 
-void VersionedFlowSensitive::finalize()
+void LOPA::finalize()
 {
     FlowSensitive::finalize();
     // vPtD->dumpPTData();
@@ -103,37 +102,31 @@ void VersionedFlowSensitive::finalize()
         vdgManager.dumpStats();
 }
 
-bool VersionedFlowSensitive::meld(MeldVersion &mv1, const MeldVersion &mv2)
+bool LOPA::delta(const NodeID l) const
 {
-    // Meld operator is union of bit vectors.
-    return mv1 |= mv2;
-}
-
-bool VersionedFlowSensitive::delta(const NodeID l) const
-{
-    assert(l < deltaMap.size() && "VFS::delta: deltaMap is missing SVFG nodes!");
+    assert(l < deltaMap.size() && "LOPA::delta: deltaMap is missing SVFG nodes!");
     return deltaMap[l];
 }
 
-bool VersionedFlowSensitive::deltaSource(const NodeID l) const
+bool LOPA::deltaSource(const NodeID l) const
 {
-    assert(l < deltaSourceMap.size() && "VFS::delta: deltaSourceMap is missing SVFG nodes!");
+    assert(l < deltaSourceMap.size() && "LOPA::delta: deltaSourceMap is missing SVFG nodes!");
     return deltaSourceMap[l];
 }
 
-bool VersionedFlowSensitive::isStore(const NodeID l) const
+bool LOPA::isStore(const NodeID l) const
 {
-    assert(l < isStoreMap.size() && "VFS::isStore: isStoreMap is missing SVFG nodes!");
+    assert(l < isStoreMap.size() && "LOPA::isStore: isStoreMap is missing SVFG nodes!");
     return isStoreMap[l];
 }
 
-bool VersionedFlowSensitive::isLoad(const NodeID l) const
+bool LOPA::isLoad(const NodeID l) const
 {
-    assert(l < isLoadMap.size() && "VFS::isLoad: isLoadMap is missing SVFG nodes!");
+    assert(l < isLoadMap.size() && "LOPA::isLoad: isLoadMap is missing SVFG nodes!");
     return isLoadMap[l];
 }
 
-void VersionedFlowSensitive::buildIsStoreLoadMaps(void)
+void LOPA::buildIsStoreLoadMaps(void)
 {
     isStoreMap.resize(svfg->getTotalNodeNum(), false);
     isLoadMap.resize(svfg->getTotalNodeNum(), false);
@@ -144,7 +137,7 @@ void VersionedFlowSensitive::buildIsStoreLoadMaps(void)
     }
 }
 
-void VersionedFlowSensitive::buildDeltaMaps(void)
+void LOPA::buildDeltaMaps(void)
 {
     deltaMap.resize(svfg->getTotalNodeNum(), false);
 
@@ -201,7 +194,7 @@ void VersionedFlowSensitive::buildDeltaMaps(void)
     }
 }
 
-void VersionedFlowSensitive::removeAllIndirectSVFGEdges(void)
+void LOPA::removeAllIndirectSVFGEdges(void)
 {
     for (SVFG::iterator nodeIt = svfg->begin(); nodeIt != svfg->end(); ++nodeIt)
     {
@@ -223,8 +216,21 @@ void VersionedFlowSensitive::removeAllIndirectSVFGEdges(void)
     setGraph(svfg);
 }
 
-void VersionedFlowSensitive::solveWorklist()
+void LOPA::solveWorklist()
 {
+    // FlowSensitive refreshes callGraphSCC before each solve round. An indirect
+    // call can make a stack object's function recursive without changing the
+    // store's operands. Revisit such stores so their formerly strong updates
+    // become weak and activate the pending consume -> yield edges.
+    for (const auto &entry : pendingStoreObjsByLoc)
+    {
+        const auto *store = SVFUtil::cast<StoreSVFGNode>(svfg->getSVFGNode(entry.first));
+        NodeID singleton = 0;
+        if (!getPts(store->getPAGDstNodeID()).empty()
+                && !isStrongUpdate(store, singleton))
+            pushIntoWorklist(entry.first);
+    }
+
     // Main solving loop: alternate between stmt worklist and version propagation
     // Uses priority-based processing: addr/load nodes first, then others, then stores last
     bool changed = true;
@@ -252,7 +258,7 @@ void VersionedFlowSensitive::solveWorklist()
 }
 
 
-void VersionedFlowSensitive::propagateAllVersions()
+void LOPA::propagateAllVersions()
 {
     double start = stat->getClk();
 
@@ -262,7 +268,7 @@ void VersionedFlowSensitive::propagateAllVersions()
         const NodeID obj = vdgManager.popPendingVDG();
         VDG *graph = vdgManager.getVDG(obj);
 
-        assert(graph->hasPendingUpdates() && "VFS::propagateAllVersions: pending VDG should have updates!");
+        assert(graph->hasPendingUpdates() && "LOPA::propagateAllVersions: pending VDG should have updates!");
 
         // Define propagation callback: union pts from srcV to dstV
         auto propagateCallback = [this, obj, graph](Version srcV, Version dstV) -> bool
@@ -284,17 +290,21 @@ void VersionedFlowSensitive::propagateAllVersions()
         auto stmtRelianceCallback = [this, obj, graph](Version v)
         {
             const NodeBS& stmts = graph->getStmtReliance(v);
+            const bool noLoadCache = Options::LOPANoLoadCache();
             for (NodeID s : stmts)
             {
                 // stmtReliance is load-only (set in buildVDG).
                 // Only invalidate-and-requeue when this object was already processed
                 // by the load; untouched bits are left as-is.
-                assert((isLoad(s)) && "VFS::stmtRelianceCallback: unexpected stmt kind");
+                assert((isLoad(s)) && "LOPA::stmtRelianceCallback: unexpected stmt kind");
                 assert(s < stmtPtsCache.size() && "stmtPtsCache must be pre-sized to SVFG node count");
                 PointsTo &cachedQPts = stmtPtsCache[s];
-                if (!cachedQPts.test(obj))
-                    continue;
-                cachedQPts.reset(obj);
+                if (!noLoadCache)
+                {
+                    if (!cachedQPts.test(obj))
+                        continue;
+                    cachedQPts.reset(obj);
+                }
                 pushIntoWorklist(s);
             }
         };
@@ -307,7 +317,7 @@ void VersionedFlowSensitive::propagateAllVersions()
     versionPropTime += (end - start) / TIMEINTERVAL;
 }
 
-void VersionedFlowSensitive::processNode(NodeID n)
+void LOPA::processNode(NodeID n)
 {
     SVFGNode* sn = svfg->getSVFGNode(n);
     if (processSVFGNode(sn))
@@ -316,7 +326,7 @@ void VersionedFlowSensitive::processNode(NodeID n)
     }
 }
 
-void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
+void LOPA::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
 {
     for (const SVFGEdge *e : newEdges)
     {
@@ -337,10 +347,10 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
         else
         {
             const IndirectSVFGEdge *ie = SVFUtil::dyn_cast<IndirectSVFGEdge>(e);
-            assert(ie != nullptr && "VFS::updateConnectedNodes: given direct edge?");
+            assert(ie != nullptr && "LOPA::updateConnectedNodes: given direct edge?");
 
-            assert(delta(dst) && "VFS::updateConnectedNodes: new edges should be to delta nodes!");
-            assert(deltaSource(src) && "VFS::updateConnectedNodes: new indirect edges should be from delta source nodes!");
+            assert(delta(dst) && "LOPA::updateConnectedNodes: new edges should be to delta nodes!");
+            assert(deltaSource(src) && "LOPA::updateConnectedNodes: new indirect edges should be from delta source nodes!");
 
             const NodeBS &ept = ie->getPointsTo();
             // For every o, such that src --o--> dst, we need to set up reliance (and mark for propagation).
@@ -367,7 +377,7 @@ void VersionedFlowSensitive::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
     }
 }
 
-bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
+bool LOPA::processLoad(const LoadSVFGNode* load)
 {
     double start = stat->getClk();
 
@@ -384,13 +394,14 @@ bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
     const PointsTo& qpt = getPts(q);
     assert(l < stmtPtsCache.size() && "stmtPtsCache must be pre-sized to SVFG node count");
     PointsTo& cachedQPts = stmtPtsCache[l];
+    const bool noLoadCache = Options::LOPANoLoadCache();
     bool hasDeltaQpt = false;
     const bool dstIsPointer = load->getPAGDstNode()->isPointer();
 
     // Iterate only newly-seen/invalidated objects for this load.
     for (NodeID o : qpt)
     {
-        if (!cachedQPts.test_and_set(o))
+        if (!noLoadCache && !cachedQPts.test_and_set(o))
             continue;
 
         hasDeltaQpt = true;
@@ -439,7 +450,7 @@ bool VersionedFlowSensitive::processLoad(const LoadSVFGNode* load)
 }
 
 // 1.yield version get store content 2.yield version get consume version 3.propagate further
-bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
+bool LOPA::processStore(const StoreSVFGNode* store)
 {
     NodeID p = store->getPAGDstNodeID();
     const PointsTo &ppt = getPts(p);
@@ -503,15 +514,15 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
         }
 
         NodeVector& pendingObjs = pendingIt->second;
-        NodeVector survivors;
-        survivors.reserve(pendingObjs.size());
+        // At most one object survives a visit: the strong-update singleton.
+        NodeID survivor = 0;
 
         for (const NodeID o : pendingObjs)
         {
             // Keep the strong-updated singleton pending until it stops being strong-update.
             if (isSU && o == singleton)
             {
-                survivors.push_back(o);
+                survivor = o;
                 continue;
             }
 
@@ -529,7 +540,9 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
             }
         }
 
-        pendingObjs.swap(survivors);
+        pendingObjs.clear();
+        if (survivor != 0)
+            pendingObjs.push_back(survivor);
 
         if (pendingObjs.empty())
             pendingStoreObjsByLoc.erase(pendingIt);
@@ -541,7 +554,7 @@ bool VersionedFlowSensitive::processStore(const StoreSVFGNode* store)
     return false;
 }
 
-bool VersionedFlowSensitive::processGep(const GepSVFGNode* edge)
+bool LOPA::processGep(const GepSVFGNode* edge)
 {
     double start = stat->getClk();
     bool changed = false;
@@ -603,7 +616,7 @@ bool VersionedFlowSensitive::processGep(const GepSVFGNode* edge)
     return changed;
 }
 
-void VersionedFlowSensitive::cluster(void)
+void LOPA::cluster(void)
 {
     std::vector<std::pair<unsigned, unsigned>> keys;
     for (SVFIR::iterator pit = pag->begin(); pit != pag->end(); ++pit)
@@ -628,7 +641,7 @@ void VersionedFlowSensitive::cluster(void)
     PointsTo::setCurrentBestNodeMapping(nodeMapping, reverseNodeMapping);
 }
 
-Version VersionedFlowSensitive::getVersion(const NodeID l, const NodeID o, const ObjToLocVersionMap &lvm) const
+Version LOPA::getVersion(const NodeID l, const NodeID o, const ObjToLocVersionMap &lvm) const
 {
     const ObjToLocVersionMap::const_iterator oIt = lvm.find(o);
     if (oIt == lvm.end() || !oIt->second)
@@ -639,19 +652,19 @@ Version VersionedFlowSensitive::getVersion(const NodeID l, const NodeID o, const
     return foundVersion == lvmByObj.end() ? invalidVersion : foundVersion->second;
 }
 
-Version VersionedFlowSensitive::getConsume(const NodeID l, const NodeID o) const
+Version LOPA::getConsume(const NodeID l, const NodeID o) const
 {
     return getVersion(l, o, consume);
 }
 
-Version VersionedFlowSensitive::getYield(const NodeID l, const NodeID o) const
+Version LOPA::getYield(const NodeID l, const NodeID o) const
 {
     // Non-store: consume == yield.
     if (isStore(l)) return getVersion(l, o, yield);
     else return getVersion(l, o, consume);
 }
 
-void VersionedFlowSensitive::setVersion(const NodeID l, const NodeID o, const Version v, ObjToLocVersionMap &lvm)
+void LOPA::setVersion(const NodeID l, const NodeID o, const Version v, ObjToLocVersionMap &lvm)
 {
     LocToVersionMapPtr &objMapPtr = lvm[o];
     if (!objMapPtr)
@@ -660,19 +673,19 @@ void VersionedFlowSensitive::setVersion(const NodeID l, const NodeID o, const Ve
     (*objMapPtr)[l] = v;
 }
 
-void VersionedFlowSensitive::setConsume(const NodeID l, const NodeID o, const Version v)
+void LOPA::setConsume(const NodeID l, const NodeID o, const Version v)
 {
     setVersion(l, o, v, consume);
 }
 
-void VersionedFlowSensitive::setYield(const NodeID l, const NodeID o, const Version v)
+void LOPA::setYield(const NodeID l, const NodeID o, const Version v)
 {
     // Non-store: consume == yield.
     if (isStore(l)) setVersion(l, o, v, yield);
     else setVersion(l, o, v, consume);
 }
 
-NodeBS &VersionedFlowSensitive::getStmtReliance(const NodeID o, const Version v)
+NodeBS &LOPA::getStmtReliance(const NodeID o, const Version v)
 {
     return stmtReliance[o][v];
 }

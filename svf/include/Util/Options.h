@@ -107,7 +107,7 @@ public:
     // Sparse value-flow graph (VFG.cpp)
     static const Option<bool> DumpVFG;
 
-    // Version dependency graph (VersionedFlowSensitive.cpp)
+    // Version dependency graph (LOPA.cpp)
     static const Option<bool> DumpVDG;
     static const Option<bool> VDGStat;
     static const Option<bool> VDGSplitByObject;
@@ -115,8 +115,11 @@ public:
     static const Option<u32_t> VDGMaxNodes;
     static const Option<std::string> VDGOutput;
     static const Option<std::string> VDGPassOrder;
-    static const Option<bool> VDGPassProfile;
-    static const Option<bool> VFSObjFSLowerBound;
+    static const Option<std::string> VDGPassProfile;
+    static const Option<bool> LOPAObjFSLowerBound;
+    static const Option<bool> LOPANoOffline;
+    static const Option<bool> LOPANoDSU;
+    static const Option<bool> LOPANoLoadCache;
 
     // Base class of pointer analyses (PointerAnalysis.cpp)
     static const Option<bool> TypePrint;

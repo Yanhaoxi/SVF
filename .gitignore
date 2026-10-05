@@ -2,6 +2,8 @@ Release*/
 install/
 Debug*/
 build/
+*-build/
+labv1-build/
 html/
 Test-Suite
 Release+Asserts/
@@ -29,4 +31,7 @@ case/
 other.md
 llvm.sh
 test/
+tests/
+tmp/
 analysis/
+*.dot

@@ -79,7 +79,7 @@ BVDataPTAImpl::BVDataPTAImpl(SVFIR* p, PointerAnalysis::PTATY type, bool alias_c
             else assert(false && "BVDataPTAImpl::BVDataPTAImpl: unexpected points-to backing type!");
         }
     }
-    else if (type == VFS_WPA)
+    else if (type == LOPA_WPA)
     {
         if (Options::ptDataBacking() == PTBackingType::Mutable) ptD = std::make_unique<MutVersionedPTDataTy>(false);
         else if (Options::ptDataBacking() == PTBackingType::Persistent) ptD = std::make_unique<PersVersionedPTDataTy>(getPtCache(), false);
@@ -588,10 +588,17 @@ void BVDataPTAImpl::normalizePointsTo()
         NodeID n = nIter->first;
 
         const PointsTo &tmpPts = getPts(n);
+        // Snapshot the gep nodes to drop before mutating. clearPts()/addPts()
+        // mutate the underlying SparseBitVector and reset() erases the list
+        // element node once it becomes empty, invalidating tmpPts iterators.
+        PointsTo dropPts;
         for (NodeID obj : tmpPts)
         {
-            if (!dropNodes.test(obj))
-                continue;
+            if (dropNodes.test(obj))
+                dropPts.set(obj);
+        }
+        for (NodeID obj : dropPts)
+        {
             NodeID baseObj = pag->getBaseObjVar(obj);
             clearPts(n, obj);
             addPts(n, baseObj);

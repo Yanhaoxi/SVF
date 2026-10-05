@@ -1,12 +1,12 @@
-//===- VersionedFlowSensitiveIO.cpp -- I/O helpers for versioned flow-sensitive PTA ---//
+//===- IO.cpp -- I/O helpers for versioned flow-sensitive PTA ---//
 
 /*
- * VersionedFlowSensitiveIO.cpp
+ * IO.cpp
  *
  *  Created on: Mar 13, 2026
  */
 
-#include "WPA/VersionedFlowSensitive.h"
+#include "WPA/LOPA.h"
 #include "Util/SVFUtil.h"
 #include <algorithm>
 #include <fstream>
@@ -15,7 +15,7 @@
 
 using namespace SVF;
 
-void VersionedFlowSensitive::drawVersionDependencyGraph(const std::string& filename) const
+void LOPA::drawVersionDependencyGraph(const std::string& filename) const
 {
     if (filename.empty())
         return;
@@ -23,7 +23,7 @@ void VersionedFlowSensitive::drawVersionDependencyGraph(const std::string& filen
     vdgManager.writeToFile(filename);
 }
 
-void VersionedFlowSensitive::dumpLocVersionMaps(void) const
+void LOPA::dumpLocVersionMaps(void) const
 {
     SVFUtil::outs() << "# LocVersion Maps\n";
     NodeVector objects;
@@ -67,25 +67,7 @@ void VersionedFlowSensitive::dumpLocVersionMaps(void) const
     }
 }
 
-void VersionedFlowSensitive::dumpMeldVersion(MeldVersion &v)
-{
-    SVFUtil::outs() << "[ ";
-    bool first = true;
-    for (unsigned e : v)
-    {
-        if (!first)
-        {
-            SVFUtil::outs() << ", ";
-        }
-
-        SVFUtil::outs() << e;
-        first = false;
-    }
-
-    SVFUtil::outs() << " ]";
-}
-
-void VersionedFlowSensitive::readPtsFromFile(const std::string& filename)
+void LOPA::readPtsFromFile(const std::string& filename)
 {
     /// Initialization for the Solver
     initialize();
@@ -121,7 +103,7 @@ void VersionedFlowSensitive::readPtsFromFile(const std::string& filename)
     finalize();
 }
 
-void VersionedFlowSensitive::solveAndwritePtsToFile(const std::string& filename)
+void LOPA::solveAndwritePtsToFile(const std::string& filename)
 {
     /// Initialization for the Solver
     initialize();
@@ -137,7 +119,7 @@ void VersionedFlowSensitive::solveAndwritePtsToFile(const std::string& filename)
     finalize();
 }
 
-void VersionedFlowSensitive::writeVersionedAnalysisResultToFile(const std::string& filename)
+void LOPA::writeVersionedAnalysisResultToFile(const std::string& filename)
 {
     SVFUtil::outs() << "Storing Versioned Analysis Result to '" << filename << "'...";
     std::error_code err;
@@ -148,16 +130,16 @@ void VersionedFlowSensitive::writeVersionedAnalysisResultToFile(const std::strin
         return;
     }
 
-    for (const VersionedFlowSensitive::ObjToLocVersionMap *lvm :
+    for (const LOPA::ObjToLocVersionMap *lvm :
          {
              &this->consume, &this->yield
          })
     {
-        for (const VersionedFlowSensitive::ObjToLocVersionMap::value_type &ovm : *lvm)
+        for (const LOPA::ObjToLocVersionMap::value_type &ovm : *lvm)
         {
             const NodeID o = ovm.first;
             if (!ovm.second) continue;
-            for (const VersionedFlowSensitive::LocToVersionMap::value_type &lv : *(ovm.second))
+            for (const LOPA::LocToVersionMap::value_type &lv : *(ovm.second))
             {
                 const Version v = lv.second;
                 if (vPtD->getPts(atKey(o, v)).empty()) continue;
@@ -190,7 +172,7 @@ void VersionedFlowSensitive::writeVersionedAnalysisResultToFile(const std::strin
     }
 }
 
-void VersionedFlowSensitive::readVersionedAnalysisResultFromFile(std::ifstream& F)
+void LOPA::readVersionedAnalysisResultFromFile(std::ifstream& F)
 {
     std::string line;
     std::string delimiter1 = " -> { ";

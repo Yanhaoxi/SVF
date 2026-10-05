@@ -1,7 +1,7 @@
-//===- VersionedFlowSensitive.h -- Versioned flow-sensitive pointer analysis --------//
+//===- LOPA.h -- load-observable versioned flow-sensitive pointer analysis ----//
 
 /*
- * VersionedFlowSensitiveAnalysis.h
+ * LOPA.h
  *
  *  Created on: Jun 26, 2020
  *      Author: Mohamad Barbar
@@ -11,8 +11,8 @@
  * International Symposium on Code Generation and Optimization (CGO'21)
  */
 
-#ifndef VFS_H_
-#define VFS_H_
+#ifndef LOPA_H_
+#define LOPA_H_
 
 #include "Graphs/SVFGOPT.h"
 #include "Graphs/VDG.h"
@@ -29,14 +29,11 @@ namespace SVF
 class AndersenWaveDiff;
 
 /*!
- * Versioned flow sensitive whole program pointer analysis
+ * LOPA: load-observable versioned flow-sensitive whole program pointer analysis
  */
-class VersionedFlowSensitive : public FlowSensitive
+class LOPA : public FlowSensitive
 {
-    friend class VersionedFlowSensitiveStat;
-
-private:
-    typedef CoreBitVector MeldVersion;
+    friend class LOPAStat;
 
 public:
     /// Per-object location-version map: l -> v.
@@ -44,8 +41,6 @@ public:
     typedef std::shared_ptr<LocToVersionMap> LocToVersionMapPtr;
     /// Object-indexed version map (o:l:v): o -> shared(l -> v).
     typedef Map<NodeID, LocToVersionMapPtr> ObjToLocVersionMap;
-    /// (o -> (v -> versions with rely on o:v).
-    typedef Map<NodeID, Map<Version, std::vector<Version>>> VersionRelianceMap;
 
     /// If this version appears, there has been an error.
     static const Version invalidVersion;
@@ -54,7 +49,7 @@ public:
     static VersionedVar atKey(NodeID, Version);
 
     /// Constructor
-    VersionedFlowSensitive(SVFIR *_pag, PTATY type = VFS_WPA);
+    LOPA(SVFIR *_pag, PTATY type = LOPA_WPA);
 
     /// Initialize analysis
     virtual void initialize() override;
@@ -65,38 +60,38 @@ public:
     /// Get PTA name
     virtual const std::string PTAName() const override
     {
-        return "VersionedFlowSensitive";
+        return "LOPA";
     }
 
     /// Methods to support type inquiry through isa, cast, and dyn_cast
     //@{
-    static inline bool classof(const VersionedFlowSensitive *)
+    static inline bool classof(const LOPA *)
     {
         return true;
     }
     static inline bool classof(const PointerAnalysis *pta)
     {
-        return pta->getAnalysisTy() == VFS_WPA;
+        return pta->getAnalysisTy() == LOPA_WPA;
     }
     //@}
 
     /// Create single instance of versioned flow-sensitive points-to analysis.
-    static VersionedFlowSensitive *createVFSWPA(SVFIR *_pag)
+    static LOPA *createLOPA(SVFIR *_pag)
     {
-        if (vfspta == nullptr)
+        if (lopa == nullptr)
         {
-            vfspta = new VersionedFlowSensitive(_pag);
-            vfspta->analyze();
+            lopa = new LOPA(_pag);
+            lopa->analyze();
         }
 
-        return vfspta;
+        return lopa;
     }
 
     /// Release flow-sensitive pointer analysis
-    static void releaseVFSWPA()
+    static void releaseLOPA()
     {
-        if (vfspta) delete vfspta;
-        vfspta = nullptr;
+        if (lopa) delete lopa;
+        lopa = nullptr;
     }
 
 protected:
@@ -178,16 +173,13 @@ public:
     /// Skip solving when pass-profile mode is enabled.
     void solveConstraints() override;
 
-    /// Dumps a MeldVersion to stdout.
-    static void dumpMeldVersion(MeldVersion &v);
-
 private:
     /// Prelabel the SVFG: set y(o) for stores and c(o) for delta nodes to a new version.
     void prelabel(void);
     /// Build VDG in object-major pipeline (includes labeling/materialization/simplify/bind).
     void buildVDG(void);
-    /// Melds v2 into v1 (in place), returns whether a change occurred.
-    static bool meld(MeldVersion &mv1, const MeldVersion &mv2);
+    /// Per-build state for the object-major VDG pipeline (defined in LOPA/VDGBuilder.cpp).
+    struct VDGBuildContext;
 
     /// Removes all indirect edges in the SVFG.
     void removeAllIndirectSVFGEdges(void);
@@ -237,8 +229,6 @@ private:
     /// Version dependency graph manager
     VDGManager vdgManager;
 
-    /// o -> (version -> versions which rely on it).
-    VersionRelianceMap versionReliance;
     /// o x version -> statement nodes which rely on that o/version.
     Map<NodeID, Map<Version, NodeBS>> stmtReliance;
 
@@ -296,7 +286,6 @@ private:
 
     /// Additional statistics.
     //@{
-    u32_t numPrelabelVersions; ///< Number of versions created during prelabeling.
     u32_t numPrelabelNodes;    ///< Number of load nodes participating in prelabeling.
     u32_t numPrelabelFIObjs;   ///< Number of pre-labeled FI objects.
 
@@ -305,10 +294,13 @@ private:
     double vdgBuildTime;     ///< Time to execute the full buildVDG pipeline.
     //@}
 
-    static VersionedFlowSensitive *vfspta;
+    static LOPA *lopa;
 
 };
 
+/// Pass-pattern profiling entry point (defined in LOPA/Profiling.cpp).
+void runSVFGPassProfiling(const LOPA &pta, const SVFG *svfg);
+
 } // End namespace SVF
 
-#endif /* VFS_H_ */
+#endif /* LOPA_H_ */

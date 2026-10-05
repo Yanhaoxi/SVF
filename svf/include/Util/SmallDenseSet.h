@@ -24,6 +24,7 @@
 
 #include "Util/GeneralType.h"
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 namespace SVF
@@ -32,6 +33,9 @@ namespace SVF
 /// A sparse set optimized for small cardinality:
 /// - Small sets: linear scan over compact vector.
 /// - Larger sets: transparently enables hash lookup while keeping compact iteration order.
+///
+/// The hash index is allocated lazily on first promotion, so a low-cardinality
+/// set costs only a vector + a null pointer (the common case for VDG adjacency).
 template<typename T, size_t InlineThreshold = 8, typename THash = Hash<T>, typename TEq = std::equal_to<T>>
 class SmallDenseSet
 {
@@ -40,8 +44,29 @@ public:
     using storage_type = std::vector<T>;
     using iterator = typename storage_type::iterator;
     using const_iterator = typename storage_type::const_iterator;
+    using hash_type = Set<T, THash, TEq>;
 
     SmallDenseSet() = default;
+    ~SmallDenseSet() = default;
+
+    SmallDenseSet(const SmallDenseSet& other)
+        : values_(other.values_)
+    {
+        if (other.hash_)
+            hash_ = std::make_unique<hash_type>(*other.hash_);
+    }
+
+    SmallDenseSet& operator=(const SmallDenseSet& other)
+    {
+        if (this == &other)
+            return *this;
+        values_ = other.values_;
+        hash_ = other.hash_ ? std::make_unique<hash_type>(*other.hash_) : nullptr;
+        return *this;
+    }
+
+    SmallDenseSet(SmallDenseSet&&) noexcept = default;
+    SmallDenseSet& operator=(SmallDenseSet&&) noexcept = default;
 
     inline bool empty() const
     {
@@ -56,15 +81,16 @@ public:
     inline void reserve(size_t n)
     {
         values_.reserve(n);
-        if (useHash_)
-            hash_.reserve(n);
+        if (hash_)
+            hash_->reserve(n);
     }
 
     inline void clear()
     {
         values_.clear();
-        hash_.clear();
-        useHash_ = false;
+        if (hash_)
+            hash_->clear();
+        hash_.reset();
     }
 
     inline iterator begin()
@@ -99,16 +125,16 @@ public:
 
     inline bool contains(const T& key) const
     {
-        if (useHash_)
-            return hash_.find(key) != hash_.end();
+        if (hash_)
+            return hash_->find(key) != hash_->end();
         return std::find(values_.begin(), values_.end(), key) != values_.end();
     }
 
     inline bool insert(const T& key)
     {
-        if (useHash_)
+        if (hash_)
         {
-            auto ins = hash_.insert(key);
+            auto ins = hash_->insert(key);
             if (!ins.second)
                 return false;
             values_.push_back(key);
@@ -124,9 +150,9 @@ public:
 
     inline bool erase(const T& key)
     {
-        if (useHash_ && hash_.erase(key) == 0)
+        if (hash_ && hash_->erase(key) == 0)
             return false;
-        if (!useHash_ && std::find(values_.begin(), values_.end(), key) == values_.end())
+        if (!hash_ && std::find(values_.begin(), values_.end(), key) == values_.end())
             return false;
 
         const auto it = std::find(values_.begin(), values_.end(), key);
@@ -144,27 +170,25 @@ public:
 private:
     inline void maybePromoteHash()
     {
-        if (useHash_ || values_.size() <= InlineThreshold)
+        if (hash_ || values_.size() <= InlineThreshold)
             return;
-        hash_.reserve(values_.size());
+        hash_ = std::make_unique<hash_type>();
+        hash_->reserve(values_.size());
         for (const T& v : values_)
-            hash_.insert(v);
-        useHash_ = true;
+            hash_->insert(v);
     }
 
     inline void maybeDemoteHash()
     {
-        if (!useHash_)
+        if (!hash_)
             return;
         if (values_.size() > InlineThreshold)
             return;
-        hash_.clear();
-        useHash_ = false;
+        hash_.reset();
     }
 
     storage_type values_;
-    Set<T, THash, TEq> hash_;
-    bool useHash_ = false;
+    std::unique_ptr<hash_type> hash_;
 };
 
 } // namespace SVF

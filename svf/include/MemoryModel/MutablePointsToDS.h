@@ -85,6 +85,14 @@ public:
         return ptsMap[var];
     }
 
+    /// Non-inserting lookup: returns nullptr when var has no points-to entry.
+    /// Unlike getPts(), it never materializes an empty set for absent keys.
+    virtual inline const DataSet* getPtsIfExists(const Key& var)
+    {
+        typename PtsMap::iterator it = ptsMap.find(var);
+        return it == ptsMap.end() ? nullptr : &it->second;
+    }
+
     virtual inline const KeySet& getRevPts(const Data& datum) override
     {
         assert(this->rev && "MutablePTData::getRevPts: constructed without reverse PT support!");
@@ -914,6 +922,10 @@ public:
     virtual const DataSet& getPts(const VersionedKey& vk) override
     {
         return atPTData.getPts(vk);
+    }
+    virtual const DataSet* getPtsIfExists(const VersionedKey& vk) override
+    {
+        return atPTData.getPtsIfExists(vk);
     }
 
     virtual const KeySet& getRevPts(const Data& datum) override

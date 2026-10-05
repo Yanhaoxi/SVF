@@ -39,7 +39,7 @@
 #include "WPA/Andersen.h"
 #include "WPA/AndersenPWC.h"
 #include "WPA/FlowSensitive.h"
-#include "WPA/VersionedFlowSensitive.h"
+#include "WPA/LOPA.h"
 #include "WPA/TypeAnalysis.h"
 #include "WPA/Steensgaard.h"
 
@@ -102,8 +102,8 @@ void WPAPass::runPointerAnalysis(SVFIR* pag, u32_t kind)
     case PointerAnalysis::FSSPARSE_WPA:
         _pta = new FlowSensitive(pag);
         break;
-    case PointerAnalysis::VFS_WPA:
-        _pta = new VersionedFlowSensitive(pag);
+    case PointerAnalysis::LOPA_WPA:
+        _pta = new LOPA(pag);
         break;
     case PointerAnalysis::TypeCPP_WPA:
         _pta = new TypeAnalysis(pag);

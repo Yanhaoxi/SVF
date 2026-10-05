@@ -240,19 +240,37 @@ const Option<std::string> Options::VDGOutput(
 const Option<std::string> Options::VDGPassOrder(
     "vdg-pass-order",
     "VDG simplify pass order letters: S=scc, A=reverse-anchor, M=stable-reach, B=store/virtual-in-bfs-merge, L=load/virtual-out-bfs-merge, P=prune, T=trans-redundancy, C=chain",
-    "SPCBLC"
+    "SPC"
 );
 
-const Option<bool> Options::VDGPassProfile(
+const Option<std::string> Options::VDGPassProfile(
     "vdg-pass-profile",
-    "Enable pass-pattern profiling for VDG (separate from -vdg-stat)",
+    "Pass-pattern profiling for VDG (separate from -vdg-stat): 'on' reports opportunity coverage only; a sweep spec such as 'kill=1,0;order=,S,SPC,BL' additionally applies each strategy to the estimation graph and reports the resulting size and per-pass time",
+    ""
+);
+
+const Option<bool> Options::LOPAObjFSLowerBound(
+    "lopa-obj-fs-lower-bound",
+    "Pre-estimate object flow-sensitive lower bound and choose store c->y virtual/solid edges accordingly",
+    true
+);
+
+const Option<bool> Options::LOPANoOffline(
+    "lopa-no-offline",
+    "Disable all offline compression: skip the single-predecessor equivalence merge (DSU) and the VDG simplify passes, giving an uncompressed VDG for ablation",
     false
 );
 
-const Option<bool> Options::VFSObjFSLowerBound(
-    "vfs-obj-fs-lower-bound",
-    "Pre-estimate object flow-sensitive lower bound and choose store c->y virtual/solid edges accordingly",
-    true
+const Option<bool> Options::LOPANoDSU(
+    "lopa-no-dsu",
+    "Disable only the single-predecessor equivalence merge (DSU); keep the VDG simplify passes (ablation)",
+    false
+);
+
+const Option<bool> Options::LOPANoLoadCache(
+    "lopa-no-load-cache",
+    "Disable the load delta cache: reprocess all objects of a load on every visit (ablation)",
+    false
 );
 
 // Base class of pointer analyses (PointerAnalysis.cpp)
@@ -748,7 +766,7 @@ OptionMultiple<PointerAnalysis::PTATY> Options::PASelected(
     {PointerAnalysis::Steensgaard_WPA, "steens", "Steensgaard's pointer analysis"},
     // Disabled till further work is done.
     {PointerAnalysis::FSSPARSE_WPA, "fspta", "Sparse flow sensitive pointer analysis"},
-    {PointerAnalysis::VFS_WPA, "vfspta", "Versioned sparse flow-sensitive points-to analysis"},
+    {PointerAnalysis::LOPA_WPA, "lopa", "LOPA: load-observable versioned flow-sensitive points-to analysis"},
     {PointerAnalysis::TypeCPP_WPA, "type", "Type-based fast analysis for Callgraph, SVFIR and CHA"},
 }
 );
