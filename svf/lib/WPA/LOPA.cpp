@@ -56,8 +56,6 @@ void LOPA::initialize()
     buildDeltaMaps();
     stmtPtsCache.clear();
     stmtPtsCache.resize(svfg->getTotalNodeNum());
-    const double computeBotStart = stat->getClk(true);
-    SVFUtil::outs() << "computeBotTime\t" << (stat->getClk(true) - computeBotStart) / TIMEINTERVAL << "\n";
     prelabel();
     // Build VDGs in object-major streaming mode (includes simplify + stmt-reliance bind).
     buildVDG();
@@ -78,6 +76,47 @@ void LOPA::initialize()
     vdgManager.enterSolveAll();
 
     removeAllIndirectSVFGEdges();
+}
+
+void LOPA::exportOffline(SVFG* graph, AndersenWaveDiff* preanalysis,
+                         const PointerAnalysis& analysis, const OfflineConsumer& consumeObject)
+{
+    assert(stat == nullptr && callgraph == nullptr && callGraphSCC == nullptr);
+    svfg = graph;
+    ander = preanalysis;
+    callgraph = analysis.getCallGraph();
+    callGraphSCC = analysis.getCallGraphSCC();
+    // These two objects belong to the caller, including on an exceptional exit.
+    struct BorrowedGraphs {
+        CallGraph*& graph;
+        CallGraphSCC*& scc;
+        ~BorrowedGraphs() { graph = nullptr; scc = nullptr; }
+    } borrowed{callgraph, callGraphSCC};
+    stat = new PTAStat(this);
+    stat->startClk();
+    VDG::setSolvePhaseStarted(false);
+    buildIsStoreLoadMaps();
+    buildDeltaMaps();
+    prelabel();
+    // The default matches CG's nonempty-destination guard. The alternative
+    // explicitly opts into LOPA's existing object lower-bound construction.
+    const StoreEdgePolicy storeEdges = Options::LOPACGStorePolicy() == "deferred"
+        ? StoreEdgePolicy::Deferred : StoreEdgePolicy::ObjectLowerBound;
+    buildVDG(storeEdges);
+    const LocToVersionMap empty;
+    for (auto& entry : vdgManager.getAllVDGs())
+    {
+        const NodeID object = entry.first;
+        const auto ci = consume.find(object);
+        const auto yi = yield.find(object);
+        consumeObject(object, *entry.second,
+            ci == consume.end() ? empty : *ci->second,
+            yi == yield.end() ? empty : *yi->second);
+        entry.second.reset();
+        consume.erase(object);
+        yield.erase(object);
+    }
+    vdgManager.clear();
 }
 
 void LOPA::solveConstraints()
@@ -290,7 +329,6 @@ void LOPA::propagateAllVersions()
         auto stmtRelianceCallback = [this, obj, graph](Version v)
         {
             const NodeBS& stmts = graph->getStmtReliance(v);
-            const bool noLoadCache = Options::LOPANoLoadCache();
             for (NodeID s : stmts)
             {
                 // stmtReliance is load-only (set in buildVDG).
@@ -299,12 +337,9 @@ void LOPA::propagateAllVersions()
                 assert((isLoad(s)) && "LOPA::stmtRelianceCallback: unexpected stmt kind");
                 assert(s < stmtPtsCache.size() && "stmtPtsCache must be pre-sized to SVFG node count");
                 PointsTo &cachedQPts = stmtPtsCache[s];
-                if (!noLoadCache)
-                {
-                    if (!cachedQPts.test(obj))
-                        continue;
-                    cachedQPts.reset(obj);
-                }
+                if (!cachedQPts.test(obj))
+                    continue;
+                cachedQPts.reset(obj);
                 pushIntoWorklist(s);
             }
         };
@@ -394,14 +429,13 @@ bool LOPA::processLoad(const LoadSVFGNode* load)
     const PointsTo& qpt = getPts(q);
     assert(l < stmtPtsCache.size() && "stmtPtsCache must be pre-sized to SVFG node count");
     PointsTo& cachedQPts = stmtPtsCache[l];
-    const bool noLoadCache = Options::LOPANoLoadCache();
     bool hasDeltaQpt = false;
     const bool dstIsPointer = load->getPAGDstNode()->isPointer();
 
     // Iterate only newly-seen/invalidated objects for this load.
     for (NodeID o : qpt)
     {
-        if (!noLoadCache && !cachedQPts.test_and_set(o))
+        if (!cachedQPts.test_and_set(o))
             continue;
 
         hasDeltaQpt = true;

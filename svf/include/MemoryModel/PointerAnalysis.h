@@ -71,7 +71,11 @@ public:
         CSSummary_WPA,		///< Summary based context sensitive WPA
         FSDATAFLOW_WPA,	///< Traditional Dataflow-based flow sensitive WPA
         FSSPARSE_WPA,		///< Sparse flow sensitive WPA
+        VFS_WPA,             ///< Native versioned flow-sensitive analysis
+        CGFSPTA_WPA,          ///< Explicit flow-sensitive constraint graph, Wave solver
+        LOPA_CGFSPTA_WPA,     ///< LOPA offline frontend with the same CG solver
         LOPA_WPA,		///< LOPA: load-observable versioned flow-sensitive WPA
+        LOPA_VSFS_WPA,		///< LOPA frontend (offline compression) + VSFS-style propagation backend
         FSCS_WPA,			///< Flow-, context- sensitive WPA
         CFLFICI_WPA,		///< Flow-, context-, insensitive CFL-reachability-based analysis
         CFLFSCI_WPA,		///< Flow-insensitive, context-sensitive CFL-reachability-based analysis

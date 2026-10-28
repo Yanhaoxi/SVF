@@ -34,6 +34,7 @@
 #include "Util/PTAStat.h"
 #include "WPA/FlowSensitive.h"
 #include "WPA/LOPA.h"
+#include "WPA/VersionedFlowSensitive.h"
 
 namespace SVF
 {
@@ -228,6 +229,61 @@ private:
     u32_t _NumSingletonClasses;
     /// Max size of an equivalence class.
     u32_t _MaxEquivClassSize;
+};
+class VersionedFlowSensitiveStat : public PTAStat
+{
+public:
+    VersionedFlowSensitive *vfspta;
+
+    VersionedFlowSensitiveStat(VersionedFlowSensitive* pta): PTAStat(pta)
+    {
+        vfspta = pta;
+        clearStat();
+        startClk();
+    }
+
+    virtual ~VersionedFlowSensitiveStat() { }
+
+    virtual void performStat();
+
+private:
+    void clearStat();
+
+    /// For all version-related statistics.
+    void versionStat(void);
+
+    /// For all PTS size related statistics not handled by versionStat.
+    void ptsSizeStat(void);
+
+    /// Total number of versions across all objects.
+    u32_t _NumVersions;
+    /// Most versions for a single object.
+    u32_t _MaxVersions;
+    /// Number of version PTSs actually used (sum of next two fields).
+    u32_t _NumUsedVersions;
+    /// Number of versions with non-empty points-to sets (since versioning is over-approximate).
+    u32_t _NumNonEmptyVersions;
+    /// Number of versions with empty points-to sets (actually empty, not never-accessed).
+    u32_t _NumEmptyVersions;
+    /// Number of objects which have a single version.
+    u32_t _NumSingleVersion;
+
+    /// Largest PTS size.
+    u32_t _MaxPtsSize;
+    /// Max points-to set size in top-level pointers.
+    u32_t _MaxTopLvlPtsSize;
+    /// Max address-taken points-to set size.
+    u32_t _MaxVersionPtsSize;
+
+    /// Total of points-to set sizes for calculating averages.
+    u32_t _TotalPtsSize;
+
+    /// Average size across all points-to sets.
+    double _AvgPtsSize;
+    /// Average points-to set size for top-level pointers.
+    double _AvgTopLvlPtsSize;
+    /// Average points-to set size for address-taken objects.
+    double _AvgVersionPtsSize;
 };
 } // End namespace SVF
 

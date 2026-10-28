@@ -255,21 +255,19 @@ const Option<bool> Options::LOPAObjFSLowerBound(
     true
 );
 
+const OptionMap<std::string> Options::LOPACGStorePolicy(
+    "lopa-cg-store-policy",
+    "Store bypass construction policy for -lopa-cgfspta (default: deferred)",
+    "deferred",
+    {
+        {"deferred", "deferred", "Keep Store bypass virtual until CG resolves its destination"},
+        {"object-lower-bound", "object-lower-bound", "Use LOPA object lower-bound rules; respects -lopa-obj-fs-lower-bound"}
+    }
+);
+
 const Option<bool> Options::LOPANoOffline(
     "lopa-no-offline",
     "Disable all offline compression: skip the single-predecessor equivalence merge (DSU) and the VDG simplify passes, giving an uncompressed VDG for ablation",
-    false
-);
-
-const Option<bool> Options::LOPANoDSU(
-    "lopa-no-dsu",
-    "Disable only the single-predecessor equivalence merge (DSU); keep the VDG simplify passes (ablation)",
-    false
-);
-
-const Option<bool> Options::LOPANoLoadCache(
-    "lopa-no-load-cache",
-    "Disable the load delta cache: reprocess all objects of a load on every visit (ablation)",
     false
 );
 
@@ -368,6 +366,18 @@ Option<bool> Options::UsePreCompFieldSensitive(
     "pre-field-sensitive",
     "Use pre-computed field-sensitivity for later analysis",
     true
+);
+
+const Option<bool> Options::CGProfile(
+    "cg-profile",
+    "Report CG solver CPU time at phase boundaries (diagnostic runs only)",
+    false
+);
+
+const Option<bool> Options::CGSFR(
+    "cg-sfr",
+    "Use online stride expansion and selective SCC solving for CG-FSPTA",
+    false
 );
 
 const Option<bool> Options::EnableAliasCheck(
@@ -766,7 +776,11 @@ OptionMultiple<PointerAnalysis::PTATY> Options::PASelected(
     {PointerAnalysis::Steensgaard_WPA, "steens", "Steensgaard's pointer analysis"},
     // Disabled till further work is done.
     {PointerAnalysis::FSSPARSE_WPA, "fspta", "Sparse flow sensitive pointer analysis"},
+    {PointerAnalysis::VFS_WPA, "vfspta", "Native versioned flow-sensitive pointer analysis"},
+    {PointerAnalysis::CGFSPTA_WPA, "cgfspta", "CG-FSPTA with explicit memory states"},
+    {PointerAnalysis::LOPA_CGFSPTA_WPA, "lopa-cgfspta", "LOPA offline compression with CG-FSPTA"},
     {PointerAnalysis::LOPA_WPA, "lopa", "LOPA: load-observable versioned flow-sensitive points-to analysis"},
+    {PointerAnalysis::LOPA_VSFS_WPA, "lopa-vsfs", "LOPA frontend (offline compression) with VSFS-style propagation backend"},
     {PointerAnalysis::TypeCPP_WPA, "type", "Type-based fast analysis for Callgraph, SVFIR and CHA"},
 }
 );

@@ -1,5 +1,6 @@
 <img src="./docs/images/svf_logo_2.png" width="15%"><img src="./docs/images/svf_logo_3.png" width="85%">
 
+本分支的构建、运行参数和验证方法见 [LOPA 与 CG 使用说明](docs/cg-integration.md)。
 
 ## News
 * <b>SVF now supports new [build system](https://github.com/SVF-tools/SVF/pull/1703) (Thank [Johannes](https://github.com/Johanmyst) for his help!). </b>

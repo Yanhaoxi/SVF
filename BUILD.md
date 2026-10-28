@@ -1,8 +1,11 @@
 # Building this SVF fork (VDG / versioned flow-sensitive branch)
 
 This tree is a fork of [SVF](https://github.com/SVF-tools/SVF) that adds the
-value-dependence graph (VDG) and versioned flow-sensitive pointer analysis. The
+version dependency graph (VDG) and load-observable flow-sensitive pointer analysis. The
 branch was developed against **LLVM 16**, not the LLVM 18 used by upstream SVF.
+
+Analysis modes, common options and validation commands are documented in
+[LOPA 与 CG 使用说明](docs/cg-integration.md).
 
 ## Layout
 
@@ -11,9 +14,9 @@ branch was developed against **LLVM 16**, not the LLVM 18 used by upstream SVF.
 | `svf/`       | SVF core library (analysis, graphs incl. `Graphs/VDG.*`)          |
 | `svf-llvm/`  | LLVM front-end, tools (`wpa`, `mta`, `saber`, ...), `extapi.c`    |
 | `cmake/`     | CMake modules (incl. `Modules/FindZ3.cmake`)                      |
-| `docs/`      | design notes (`design.md`, `vdg_refactor_blueprint.md`, `verify.md`) |
-| `test/`      | test cases and scripts, see `test/README.md`                      |
-| `analysis/`  | benchmark / metric-collection scripts                             |
+| `docs/`      | [LOPA 与 CG 使用说明](docs/cg-integration.md)                     |
+| `tests/solver/` | analysis regressions, see [README](tests/solver/README.md)    |
+| `tests/graph/` | VDG regressions, see [README](tests/graph/README.md)            |
 
 ## Dependencies
 
@@ -58,9 +61,8 @@ Artifacts: `Release-build/bin/wpa` and friends, libraries under
 - If clang picks up a very new libstdc++ (e.g. GCC 16 headers) the build fails
   with `__normal_iterator ... incomplete type`. Pin the standard library with
   `--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13` (or use `g++-13`).
-  Use **GCC 13** here to match `code/svf` (`code/svf/BUILD.md`), so the LOPA
-  binary and the SFS/VSFS binary are compiled against the same libstdc++ and
-  the timing comparison is not confounded by the standard library version.
+  Use the same compiler and standard library for all analysis variants. This
+  build includes the SFS, VSFS, LOPA and CG modes used for comparison.
 - `SVF_WARN_AS_ERROR` defaults to `ON`; on newer compilers set it to `OFF` to
   avoid unrelated `-Werror` failures.
 - `extapi.bc` is located relative to the build tree. When running a binary from
@@ -70,7 +72,8 @@ Artifacts: `Release-build/bin/wpa` and friends, libraries under
 
 ```bash
 ./Release-build/bin/wpa -lopa -vdg-stat -vdg-pass-order=SPC \
-  -extapi=./Release-build/lib/extapi.bc test/case/two_path.ll
+  -extapi=./Release-build/lib/extapi.bc \
+  /home/yhx/PTA/labv1/test/soundness/simple/fs-load-cache-alias-loop.ll
 ```
 
 Useful options:

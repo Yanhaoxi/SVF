@@ -117,9 +117,8 @@ public:
     static const Option<std::string> VDGPassOrder;
     static const Option<std::string> VDGPassProfile;
     static const Option<bool> LOPAObjFSLowerBound;
+    static const OptionMap<std::string> LOPACGStorePolicy;
     static const Option<bool> LOPANoOffline;
-    static const Option<bool> LOPANoDSU;
-    static const Option<bool> LOPANoLoadCache;
 
     // Base class of pointer analyses (PointerAnalysis.cpp)
     static const Option<bool> TypePrint;
@@ -138,6 +137,8 @@ public:
     static const Option<bool> PAGPrint;
     static const Option<u32_t> IndirectCallLimit;
     static Option<bool> UsePreCompFieldSensitive;
+    static const Option<bool> CGProfile;
+    static const Option<bool> CGSFR;
     static const Option<bool> EnableAliasCheck;
     static const Option<bool> EnableTypeCheck;
     static const Option<bool> EnableThreadCallGraph;

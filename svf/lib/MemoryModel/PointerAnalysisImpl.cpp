@@ -79,7 +79,7 @@ BVDataPTAImpl::BVDataPTAImpl(SVFIR* p, PointerAnalysis::PTATY type, bool alias_c
             else assert(false && "BVDataPTAImpl::BVDataPTAImpl: unexpected points-to backing type!");
         }
     }
-    else if (type == LOPA_WPA)
+    else if (type == VFS_WPA || type == LOPA_WPA || type == LOPA_VSFS_WPA)
     {
         if (Options::ptDataBacking() == PTBackingType::Mutable) ptD = std::make_unique<MutVersionedPTDataTy>(false);
         else if (Options::ptDataBacking() == PTBackingType::Persistent) ptD = std::make_unique<PersVersionedPTDataTy>(getPtCache(), false);
