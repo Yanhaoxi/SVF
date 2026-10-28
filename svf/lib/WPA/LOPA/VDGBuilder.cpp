@@ -219,6 +219,7 @@ struct LOPA::VDGBuildContext
 
     LOPA &pta;
     const bool enableProfile;
+    const StoreEdgePolicy storeEdges;
     const size_t totalSVFGNodes;
 
     // Shared scratch, reused across objects.
@@ -248,9 +249,10 @@ struct LOPA::VDGBuildContext
     Version nextVersionBeforeDense = LOPA::invalidVersion;
     Version nextDenseVersion = LOPA::invalidVersion;
 
-    VDGBuildContext(LOPA &pta_, bool enableProfile_)
+    VDGBuildContext(LOPA &pta_, bool enableProfile_, StoreEdgePolicy storeEdges_)
         : pta(pta_),
           enableProfile(enableProfile_),
+          storeEdges(storeEdges_),
           totalSVFGNodes(pta_.svfg->getTotalNodeNum()),
           discovered(totalSVFGNodes, false),
           consumeVersionByLoc(totalSVFGNodes, LOPA::invalidVersion),
@@ -547,13 +549,12 @@ void LOPA::VDGBuildContext::compressEquivVersions()
     // step 2: 基于 DSU 合并等价版本 (单前驱非 delta 版本)，并重映射版本号到连续空间
     const double step2StartTicks = enableProfile ? pta.stat->getClk(true) : 0.0;
 
-    if (Options::LOPANoOffline() || Options::LOPANoDSU())
+    if (Options::LOPANoOffline())
     {
         // Uncompressed construction: keep every version distinct and materialize
         // the deferred single-predecessor dependences as solid edges. This yields
         // a VDG without offline equivalence merging, for ablation.
-        // -lopa-no-offline additionally disables the simplify pass pipeline;
-        // -lopa-no-dsu keeps the passes so the pipeline runs on the raw graph.
+        // -lopa-no-offline also disables the simplify pass pipeline.
         for (const std::pair<Version, Version> &eq : equiv)
         {
             if (eq.first == LOPA::invalidVersion || eq.second == LOPA::invalidVersion
@@ -677,7 +678,8 @@ void LOPA::VDGBuildContext::materializeAndSimplify(const std::vector<VDGSimplify
         if (consumeV != LOPA::invalidVersion && yieldV != LOPA::invalidVersion && consumeV != yieldV)
         {
             const bool keepVirtualStoreCY
-                = !Options::LOPAObjFSLowerBound()
+                = storeEdges == StoreEdgePolicy::Deferred
+                || !Options::LOPAObjFSLowerBound()
                 || pta.fiObjects.find(obj) == pta.fiObjects.end();
             (void)graph->addEdge(consumeV, yieldV, keepVirtualStoreCY);
         }
@@ -994,7 +996,7 @@ void LOPA::prelabel(void)
     }
 }
 
-void LOPA::buildVDG(void)
+void LOPA::buildVDG(StoreEdgePolicy storeEdges)
 {
     const double labelStart = stat->getClk(true);
 
@@ -1022,7 +1024,7 @@ void LOPA::buildVDG(void)
         buildVDGSimplifyPassPipeline(passes, Options::VDGPassOrder());
     }
 
-    VDGBuildContext ctx(*this, Options::VDGStat());
+    VDGBuildContext ctx(*this, Options::VDGStat(), storeEdges);
     ctx.prepareDeltaIndex();
     ctx.passRuns.assign(passes.size(), 0);
     ctx.passVDGNodeTotal.assign(passes.size(), 0);

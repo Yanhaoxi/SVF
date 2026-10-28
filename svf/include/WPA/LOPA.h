@@ -28,12 +28,16 @@ namespace SVF
 
 class AndersenWaveDiff;
 
+/// Forward declaration: LOPA frontend + VSFS-style propagation backend (see LOPAVSFS.h).
+class LOPAVSFS;
+
 /*!
  * LOPA: load-observable versioned flow-sensitive whole program pointer analysis
  */
 class LOPA : public FlowSensitive
 {
     friend class LOPAStat;
+    friend class LOPAVSFS;
 
 public:
     /// Per-object location-version map: l -> v.
@@ -56,6 +60,13 @@ public:
 
     /// Finalize analysis
     virtual void finalize() override;
+
+    /// Build and consume offline graphs on an existing shared frontend.
+    /// The callback receives only live versions; no solving or SVFG mutation occurs.
+    using OfflineConsumer = std::function<void(NodeID, const VDG&,
+        const LocToVersionMap&, const LocToVersionMap&)>;
+    void exportOffline(SVFG* graph, AndersenWaveDiff* preanalysis,
+                       const PointerAnalysis& analysis, const OfflineConsumer& consumeObject);
 
     /// Get PTA name
     virtual const std::string PTAName() const override
@@ -176,8 +187,9 @@ public:
 private:
     /// Prelabel the SVFG: set y(o) for stores and c(o) for delta nodes to a new version.
     void prelabel(void);
+    enum class StoreEdgePolicy { ObjectLowerBound, Deferred };
     /// Build VDG in object-major pipeline (includes labeling/materialization/simplify/bind).
-    void buildVDG(void);
+    void buildVDG(StoreEdgePolicy storeEdges = StoreEdgePolicy::ObjectLowerBound);
     /// Per-build state for the object-major VDG pipeline (defined in LOPA/VDGBuilder.cpp).
     struct VDGBuildContext;
 
