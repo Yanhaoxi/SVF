@@ -1,8 +1,8 @@
-//===- VDGBuilder.cpp -- VDG build/simplify pipeline for LOPA ---//
+//===- VDGBuilder.cpp -- VDG build/simplify pipeline for LOPAFrontend ---//
 
 #include "Util/GeneralType.h"
 #include "WPA/Andersen.h"
-#include "WPA/LOPA.h"
+#include "WPA/LOPAFrontend.h"
 #include "Util/Options.h"
 #include "MemoryModel/PointsTo.h"
 #include <algorithm>
@@ -115,7 +115,7 @@ namespace
 
             const char key = static_cast<char>(std::toupper(c));
             if (!registerVDGSimplifyPassByKey(passes, key))
-                SVFUtil::errs() << "LOPA: unknown VDG pass key '" << raw
+                SVFUtil::errs() << "LOPAFrontend: unknown VDG pass key '" << raw
                                 << "' in -vdg-pass-order=" << order << "\n";
         }
 
@@ -137,7 +137,7 @@ namespace
         const std::string fallback = "SPC";
         for (char key : fallback)
             (void)registerVDGSimplifyPassByKey(passes, key);
-        SVFUtil::errs() << "LOPA: empty VDG pass pipeline, fallback to -vdg-pass-order="
+        SVFUtil::errs() << "LOPAFrontend: empty VDG pass pipeline, fallback to -vdg-pass-order="
                         << fallback << "\n";
     }
 
@@ -156,13 +156,13 @@ namespace
 
         inline bool valid(const Version v) const
         {
-            return v != LOPA::invalidVersion && static_cast<size_t>(v) < parent.size();
+            return v != LOPAFrontend::invalidVersion && static_cast<size_t>(v) < parent.size();
         }
 
         Version find(const Version v)
         {
             if (!valid(v))
-                return LOPA::invalidVersion;
+                return LOPAFrontend::invalidVersion;
 
             const Version p = parent[v];
             if (p == 0)
@@ -176,8 +176,8 @@ namespace
         {
             Version rl = find(lhs);
             Version rr = find(rhs);
-            if (rl == LOPA::invalidVersion
-                || rr == LOPA::invalidVersion
+            if (rl == LOPAFrontend::invalidVersion
+                || rr == LOPAFrontend::invalidVersion
                 || rl == rr)
                 return false;
 
@@ -201,7 +201,7 @@ namespace
 //   step1 labelObjectVersions, step2 compressEquivVersions,
 //   step3 materializeAndSimplify, step4 shrinkAndPublish.
 //===----------------------------------------------------------------------===//
-struct LOPA::VDGBuildContext
+struct LOPAFrontend::VDGBuildContext
 {
     struct HotProfile
     {
@@ -217,7 +217,7 @@ struct LOPA::VDGBuildContext
         u64_t denseVersionMax = 0;
     };
 
-    LOPA &pta;
+    LOPAFrontend &pta;
     const bool enableProfile;
     const StoreEdgePolicy storeEdges;
     const size_t totalSVFGNodes;
@@ -233,6 +233,7 @@ struct LOPA::VDGBuildContext
 
     // Profiling accumulators.
     HotProfile profile;
+    VDGStats exportedStats;
     std::vector<u64_t> passRuns;
     std::vector<u64_t> passVDGNodeTotal;
     std::vector<u64_t> passVDGNodeMax;
@@ -245,18 +246,18 @@ struct LOPA::VDGBuildContext
     std::vector<std::pair<Version, Version>> edges;         // solid cflow dependency edges
     std::vector<std::pair<Version, Version>> vedges;        // virtual dependency edges
     std::vector<std::pair<Version, Version>> equiv;         // equivalent versions
-    Version nextVersion = LOPA::invalidVersion;
-    Version nextVersionBeforeDense = LOPA::invalidVersion;
-    Version nextDenseVersion = LOPA::invalidVersion;
+    Version nextVersion = LOPAFrontend::invalidVersion;
+    Version nextVersionBeforeDense = LOPAFrontend::invalidVersion;
+    Version nextDenseVersion = LOPAFrontend::invalidVersion;
 
-    VDGBuildContext(LOPA &pta_, bool enableProfile_, StoreEdgePolicy storeEdges_)
+    VDGBuildContext(LOPAFrontend &pta_, bool enableProfile_, StoreEdgePolicy storeEdges_)
         : pta(pta_),
           enableProfile(enableProfile_),
           storeEdges(storeEdges_),
           totalSVFGNodes(pta_.svfg->getTotalNodeNum()),
           discovered(totalSVFGNodes, false),
-          consumeVersionByLoc(totalSVFGNodes, LOPA::invalidVersion),
-          yieldVersionByLoc(totalSVFGNodes, LOPA::invalidVersion)
+          consumeVersionByLoc(totalSVFGNodes, LOPAFrontend::invalidVersion),
+          yieldVersionByLoc(totalSVFGNodes, LOPAFrontend::invalidVersion)
     {
         touchedDiscovered.reserve(totalSVFGNodes / 6 + 1);
         touchedConsumeLocs.reserve(totalSVFGNodes / 6 + 1);
@@ -281,7 +282,7 @@ private:
     void shrinkAndPublish();
 };
 
-void LOPA::VDGBuildContext::prepareDeltaIndex()
+void LOPAFrontend::VDGBuildContext::prepareDeltaIndex()
 {
     // Cache possible delta destinations per delta-source statement (srcId).
     // This is object-independent and should be built once per srcId.
@@ -375,30 +376,30 @@ void LOPA::VDGBuildContext::prepareDeltaIndex()
     Map<NodeID, NodeVector>().swap(deltaDstCache);
 }
 
-void LOPA::VDGBuildContext::resetScratch()
+void LOPAFrontend::VDGBuildContext::resetScratch()
 {
     for (const NodeID n : touchedDiscovered)
         discovered[n] = false;
     touchedDiscovered.clear();
 
     for (const NodeID stmtId : touchedConsumeLocs)
-        consumeVersionByLoc[stmtId] = LOPA::invalidVersion;
+        consumeVersionByLoc[stmtId] = LOPAFrontend::invalidVersion;
     touchedConsumeLocs.clear();
 
     for (const NodeID stmtId : touchedYieldLocs)
-        yieldVersionByLoc[stmtId] = LOPA::invalidVersion;
+        yieldVersionByLoc[stmtId] = LOPAFrontend::invalidVersion;
     touchedYieldLocs.clear();
 
     osStmtReliance.clear();
     edges.clear();
     vedges.clear();
     equiv.clear();
-    nextVersion = LOPA::invalidVersion;
-    nextVersionBeforeDense = LOPA::invalidVersion;
-    nextDenseVersion = LOPA::invalidVersion;
+    nextVersion = LOPAFrontend::invalidVersion;
+    nextVersionBeforeDense = LOPAFrontend::invalidVersion;
+    nextDenseVersion = LOPAFrontend::invalidVersion;
 }
 
-bool LOPA::VDGBuildContext::markDiscovered(const NodeID n)
+bool LOPAFrontend::VDGBuildContext::markDiscovered(const NodeID n)
 {
     if (n >= discovered.size() || discovered[n])
         return false;
@@ -407,25 +408,25 @@ bool LOPA::VDGBuildContext::markDiscovered(const NodeID n)
     return true;
 }
 
-Version LOPA::VDGBuildContext::getOrCreateConsumeVersion(const NodeID stmtId)
+Version LOPAFrontend::VDGBuildContext::getOrCreateConsumeVersion(const NodeID stmtId)
 {
     assert(static_cast<size_t>(stmtId) < consumeVersionByLoc.size() && "stmtId out of dense consume map range");
     Version &slot = consumeVersionByLoc[stmtId];
-    if (slot != LOPA::invalidVersion)
+    if (slot != LOPAFrontend::invalidVersion)
         return slot;
 
     slot = ++nextVersion;
     touchedConsumeLocs.push_back(stmtId);
-    if (pta.isLoad(stmtId))
+    if (!pta.offlineConsumer && pta.isLoad(stmtId))
         osStmtReliance.emplace_back(slot, stmtId);
     return slot;
 }
 
-Version LOPA::VDGBuildContext::getOrCreateStoreYieldVersion(const NodeID storeId)
+Version LOPAFrontend::VDGBuildContext::getOrCreateStoreYieldVersion(const NodeID storeId)
 {
     assert(static_cast<size_t>(storeId) < yieldVersionByLoc.size() && "storeId out of dense yield map range");
     Version &slot = yieldVersionByLoc[storeId];
-    if (slot != LOPA::invalidVersion)
+    if (slot != LOPAFrontend::invalidVersion)
         return slot;
 
     slot = ++nextVersion;
@@ -433,7 +434,7 @@ Version LOPA::VDGBuildContext::getOrCreateStoreYieldVersion(const NodeID storeId
     return slot;
 }
 
-void LOPA::VDGBuildContext::labelObjectVersions(const NodeVector &osStartingNodes)
+void LOPAFrontend::VDGBuildContext::labelObjectVersions(const NodeVector &osStartingNodes)
 {
     // --- step 1: traverse object footprint and collect versions/edges only ---
     const double step1StartTicks = enableProfile ? pta.stat->getClk(true) : 0.0;
@@ -464,7 +465,7 @@ void LOPA::VDGBuildContext::labelObjectVersions(const NodeVector &osStartingNode
         const bool dstIsDelta = pta.delta(dstId);
 
         unsigned inedge = 0;
-        Version singlePredV = LOPA::invalidVersion;
+        Version singlePredV = LOPAFrontend::invalidVersion;
         for (const SVFGEdge *edge : dst->getInEdges())
         {
             const IndirectSVFGEdge *ie = SVFUtil::dyn_cast<IndirectSVFGEdge>(edge);
@@ -487,7 +488,7 @@ void LOPA::VDGBuildContext::labelObjectVersions(const NodeVector &osStartingNode
                 // For non-delta dst, defer emitting the first edge until we know
                 // whether this is truly single-predecessor (only Equiv needed).
                 singlePredV = srcV;
-                assert(singlePredV != LOPA::invalidVersion && "single pred version should be valid");
+                assert(singlePredV != LOPAFrontend::invalidVersion && "single pred version should be valid");
             }
             else
             {
@@ -495,7 +496,7 @@ void LOPA::VDGBuildContext::labelObjectVersions(const NodeVector &osStartingNode
                 // flush deferred first edge, then append current edge.
                 if (inedge == 2)
                 {
-                    assert(singlePredV != LOPA::invalidVersion && "deferred first pred should be valid");
+                    assert(singlePredV != LOPAFrontend::invalidVersion && "deferred first pred should be valid");
                     edges.emplace_back(singlePredV, dstConsumeV);
                 }
                 edges.emplace_back(srcV, dstConsumeV);
@@ -542,7 +543,7 @@ void LOPA::VDGBuildContext::labelObjectVersions(const NodeVector &osStartingNode
         profile.step1Ticks += pta.stat->getClk(true) - step1StartTicks;
 }
 
-void LOPA::VDGBuildContext::compressEquivVersions()
+void LOPAFrontend::VDGBuildContext::compressEquivVersions()
 {
     nextVersionBeforeDense = nextVersion;
 
@@ -557,7 +558,7 @@ void LOPA::VDGBuildContext::compressEquivVersions()
         // -lopa-no-offline also disables the simplify pass pipeline.
         for (const std::pair<Version, Version> &eq : equiv)
         {
-            if (eq.first == LOPA::invalidVersion || eq.second == LOPA::invalidVersion
+            if (eq.first == LOPAFrontend::invalidVersion || eq.second == LOPAFrontend::invalidVersion
                 || eq.first == eq.second)
                 continue;
             edges.emplace_back(eq.second, eq.first); // singlePredV -> dstConsumeV
@@ -576,17 +577,17 @@ void LOPA::VDGBuildContext::compressEquivVersions()
     // Build root -> dense-version map (1..N) after DSU is frozen.
     // Versions are already dense in [1..nextVersion], so vector remap is
     // cheaper than per-lookup hash maps in this hot path.
-    std::vector<Version> rootToDense(static_cast<size_t>(nextVersion) + 1, LOPA::invalidVersion);
-    std::vector<Version> versionToDense(static_cast<size_t>(nextVersion) + 1, LOPA::invalidVersion);
-    Version nextDense = LOPA::invalidVersion;
-    for (Version v = LOPA::invalidVersion + 1; v <= nextVersion; ++v)
+    std::vector<Version> rootToDense(static_cast<size_t>(nextVersion) + 1, LOPAFrontend::invalidVersion);
+    std::vector<Version> versionToDense(static_cast<size_t>(nextVersion) + 1, LOPAFrontend::invalidVersion);
+    Version nextDense = LOPAFrontend::invalidVersion;
+    for (Version v = LOPAFrontend::invalidVersion + 1; v <= nextVersion; ++v)
     {
         const Version root = equivDsu.find(v);
-        if (root == LOPA::invalidVersion)
+        if (root == LOPAFrontend::invalidVersion)
             continue;
 
         Version &denseSlot = rootToDense[root];
-        if (denseSlot == LOPA::invalidVersion)
+        if (denseSlot == LOPAFrontend::invalidVersion)
         {
             denseSlot = ++nextDense;
         }
@@ -595,11 +596,11 @@ void LOPA::VDGBuildContext::compressEquivVersions()
 
     auto toDenseVersion = [&versionToDense](const Version oldV) -> Version
     {
-        if (oldV == LOPA::invalidVersion)
-            return LOPA::invalidVersion;
+        if (oldV == LOPAFrontend::invalidVersion)
+            return LOPAFrontend::invalidVersion;
         const size_t idx = static_cast<size_t>(oldV);
         if (idx >= versionToDense.size())
-            return LOPA::invalidVersion;
+            return LOPAFrontend::invalidVersion;
         return versionToDense[idx];
     };
 
@@ -616,7 +617,7 @@ void LOPA::VDGBuildContext::compressEquivVersions()
     {
         const Version src = toDenseVersion(edge.first);
         const Version dst = toDenseVersion(edge.second);
-        if (src == LOPA::invalidVersion || dst == LOPA::invalidVersion || src == dst)
+        if (src == LOPAFrontend::invalidVersion || dst == LOPAFrontend::invalidVersion || src == dst)
             continue;
         edges[edgeWrite++] = std::make_pair(src, dst);
     }
@@ -627,7 +628,7 @@ void LOPA::VDGBuildContext::compressEquivVersions()
     {
         const Version src = toDenseVersion(edge.first);
         const Version dst = toDenseVersion(edge.second);
-        if (src == LOPA::invalidVersion || dst == LOPA::invalidVersion || src == dst)
+        if (src == LOPAFrontend::invalidVersion || dst == LOPAFrontend::invalidVersion || src == dst)
             continue;
         vedges[vedgeWrite++] = std::make_pair(src, dst);
     }
@@ -639,25 +640,25 @@ void LOPA::VDGBuildContext::compressEquivVersions()
         profile.step2Ticks += pta.stat->getClk(true) - step2StartTicks;
 }
 
-void LOPA::VDGBuildContext::materializeAndSimplify(const std::vector<VDGSimplifyPass> &passes)
+void LOPAFrontend::VDGBuildContext::materializeAndSimplify(const std::vector<VDGSimplifyPass> &passes)
 {
     // --- step 3: materialize dense nodes/edges, then run simplify passes ---
     const double step3StartTicks = enableProfile ? pta.stat->getClk(true) : 0.0;
-    if (nextVersion != LOPA::invalidVersion)
+    if (nextVersion != LOPAFrontend::invalidVersion)
         graph->ensureVersionCapacity(nextVersion);
 
     // label node
     for (const NodeID stmtId : touchedConsumeLocs)
     {
         const Version consumeV = consumeVersionByLoc[stmtId];
-        if (consumeV == LOPA::invalidVersion)
+        if (consumeV == LOPAFrontend::invalidVersion)
             continue;
         graph->getOrAddNode(consumeV, pta.isLoad(stmtId), false);
     }
     for (const NodeID stmtId : touchedYieldLocs)
     {
         const Version yieldV = yieldVersionByLoc[stmtId];
-        if (yieldV == LOPA::invalidVersion)
+        if (yieldV == LOPAFrontend::invalidVersion)
             continue;
         graph->getOrAddNode(yieldV, false, true);
     }
@@ -675,7 +676,7 @@ void LOPA::VDGBuildContext::materializeAndSimplify(const std::vector<VDGSimplify
     {
         const Version yieldV = yieldVersionByLoc[storeId];
         const Version consumeV = consumeVersionByLoc[storeId];
-        if (consumeV != LOPA::invalidVersion && yieldV != LOPA::invalidVersion && consumeV != yieldV)
+        if (consumeV != LOPAFrontend::invalidVersion && yieldV != LOPAFrontend::invalidVersion && consumeV != yieldV)
         {
             const bool keepVirtualStoreCY
                 = storeEdges == StoreEdgePolicy::Deferred
@@ -703,10 +704,58 @@ void LOPA::VDGBuildContext::materializeAndSimplify(const std::vector<VDGSimplify
         profile.step3Ticks += pta.stat->getClk(true) - step3StartTicks;
 }
 
-void LOPA::VDGBuildContext::shrinkAndPublish()
+void LOPAFrontend::VDGBuildContext::shrinkAndPublish()
 {
     // --- step 4: shrink/publish inside object pipeline, then map labels ---
     const double step4StartTicks = enableProfile ? pta.stat->getClk(true) : 0.0;
+    if (enableProfile)
+    {
+        ++profile.compressObjects;
+        profile.preDenseVersionTotal += static_cast<u64_t>(nextVersionBeforeDense);
+        profile.denseVersionTotal += static_cast<u64_t>(nextDenseVersion);
+        if (static_cast<u64_t>(nextVersionBeforeDense) > profile.preDenseVersionMax)
+            profile.preDenseVersionMax = static_cast<u64_t>(nextVersionBeforeDense);
+        if (static_cast<u64_t>(nextDenseVersion) > profile.denseVersionMax)
+            profile.denseVersionMax = static_cast<u64_t>(nextDenseVersion);
+    }
+
+    if (pta.offlineConsumer)
+    {
+        // The constraint-graph consumer assigns final node IDs directly. Keep
+        // only live labels and let it copy solid edges before releasing the VDG.
+        // Virtual edges have already served their purpose during simplification.
+        auto liveVersion = [this](Version version) -> Version
+        {
+            if (version == LOPAFrontend::invalidVersion || !graph->hasVersion(version))
+                return LOPAFrontend::invalidVersion;
+            const Version rep = graph->getRepVersion(version);
+            return rep != LOPAFrontend::invalidVersion && graph->hasVersion(rep)
+                ? rep : LOPAFrontend::invalidVersion;
+        };
+        LocToVersionMap liveConsumes, liveYields;
+        liveConsumes.reserve(touchedConsumeLocs.size());
+        liveYields.reserve(touchedYieldLocs.size());
+        for (const NodeID location : touchedConsumeLocs)
+        {
+            const Version version = liveVersion(consumeVersionByLoc[location]);
+            if (version != LOPAFrontend::invalidVersion)
+                liveConsumes.emplace(location, version);
+        }
+        for (const NodeID location : touchedYieldLocs)
+        {
+            const Version version = liveVersion(yieldVersionByLoc[location]);
+            if (version != LOPAFrontend::invalidVersion)
+                liveYields.emplace(location, version);
+        }
+        if (enableProfile) exportedStats.add(*graph);
+        (*pta.offlineConsumer)(obj, *graph, liveConsumes, liveYields);
+        pta.vdgManager.getAllVDGs().erase(obj);
+        graph = nullptr;
+        if (enableProfile)
+            profile.step4Ticks += pta.stat->getClk(true) - step4StartTicks;
+        return;
+    }
+
     VDG *oldGraph = graph;
     NodeVector oldReps;
     oldReps.reserve(oldGraph->getTotalNodeNum());
@@ -716,20 +765,20 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
     });
 
     const size_t oldCap = oldGraph->capacity();
-    std::vector<Version> oldToNew(oldCap, LOPA::invalidVersion);
-    Version nextNewV = LOPA::invalidVersion;
+    std::vector<Version> oldToNew(oldCap, LOPAFrontend::invalidVersion);
+    Version nextNewV = LOPAFrontend::invalidVersion;
     for (const Version oldV : oldReps)
         oldToNew[oldV] = ++nextNewV;
 
     auto mapToShrunkRep = [oldGraph, &oldToNew](Version oldV) -> Version
     {
-        if (oldV == LOPA::invalidVersion || !oldGraph->hasVersion(oldV))
-            return LOPA::invalidVersion;
+        if (oldV == LOPAFrontend::invalidVersion || !oldGraph->hasVersion(oldV))
+            return LOPAFrontend::invalidVersion;
         const Version oldRepV = oldGraph->getRepVersion(oldV);
-        if (oldRepV == LOPA::invalidVersion || !oldGraph->hasVersion(oldRepV))
-            return LOPA::invalidVersion;
+        if (oldRepV == LOPAFrontend::invalidVersion || !oldGraph->hasVersion(oldRepV))
+            return LOPAFrontend::invalidVersion;
         if (static_cast<size_t>(oldRepV) >= oldToNew.size())
-            return LOPA::invalidVersion;
+            return LOPAFrontend::invalidVersion;
         return oldToNew[oldRepV];
     };
 
@@ -738,7 +787,7 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
     for (const NodeID stmtId : touchedConsumeLocs)
     {
         const Version newV = mapToShrunkRep(consumeVersionByLoc[stmtId]);
-        if (newV != LOPA::invalidVersion)
+        if (newV != LOPAFrontend::invalidVersion)
             remappedConsumes.emplace_back(stmtId, newV);
     }
 
@@ -747,7 +796,7 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
     for (const NodeID stmtId : touchedYieldLocs)
     {
         const Version newV = mapToShrunkRep(yieldVersionByLoc[stmtId]);
-        if (newV != LOPA::invalidVersion)
+        if (newV != LOPAFrontend::invalidVersion)
             remappedYields.emplace_back(stmtId, newV);
     }
 
@@ -756,12 +805,12 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
     for (const std::pair<Version, NodeID> &vs : osStmtReliance)
     {
         const Version newV = mapToShrunkRep(vs.first);
-        if (newV != LOPA::invalidVersion)
+        if (newV != LOPAFrontend::invalidVersion)
             remappedStmtReliance.emplace_back(newV, vs.second);
     }
 
     std::unique_ptr<VDG> newGraph = std::make_unique<VDG>(obj);
-    if (nextNewV != LOPA::invalidVersion)
+    if (nextNewV != LOPAFrontend::invalidVersion)
         newGraph->ensureVersionCapacity(nextNewV);
 
     // Materialize shrunk nodes.
@@ -783,7 +832,7 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
             if (static_cast<size_t>(oldDst) >= oldToNew.size())
                 continue;
             const Version newDst = oldToNew[oldDst];
-            if (newDst != LOPA::invalidVersion)
+            if (newDst != LOPAFrontend::invalidVersion)
             {
                 (void)newGraph->addEdge(newSrc, newDst, false);
             }
@@ -794,7 +843,7 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
             if (static_cast<size_t>(oldDst) >= oldToNew.size())
                 continue;
             const Version newDst = oldToNew[oldDst];
-            if (newDst != LOPA::invalidVersion)
+            if (newDst != LOPAFrontend::invalidVersion)
             {
                 (void)newGraph->addEdge(newSrc, newDst, true);
             }
@@ -807,45 +856,6 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
     assert(vdgIt != allVDGs.end() && "VDG must exist for current object");
     vdgIt->second = std::move(newGraph);
     graph = vdgIt->second.get();
-    if (enableProfile)
-    {
-        ++profile.compressObjects;
-        profile.preDenseVersionTotal += static_cast<u64_t>(nextVersionBeforeDense);
-        profile.denseVersionTotal += static_cast<u64_t>(nextDenseVersion);
-        if (static_cast<u64_t>(nextVersionBeforeDense) > profile.preDenseVersionMax)
-            profile.preDenseVersionMax = static_cast<u64_t>(nextVersionBeforeDense);
-        if (static_cast<u64_t>(nextDenseVersion) > profile.denseVersionMax)
-            profile.denseVersionMax = static_cast<u64_t>(nextDenseVersion);
-    }
-
-    // Rebuild pending singleton-upgrade list only for store c->y edges
-    // that survive simplify/shrink as virtual edges in the final graph.
-    LocToVersionMap remappedConsumeByLoc;
-    remappedConsumeByLoc.reserve(remappedConsumes.size());
-    for (const std::pair<NodeID, Version> &lv : remappedConsumes)
-        remappedConsumeByLoc[lv.first] = lv.second;
-
-    // Check store stmt consume/yield consistency after shrink.
-    // If consume/yield differ, keep a virtual c->y edge and record pending upgrade.
-    for (const std::pair<NodeID, Version> &lv : remappedYields)
-    {
-        const NodeID storeId = lv.first;
-        const Version yieldV = lv.second;
-        const auto cIt = remappedConsumeByLoc.find(storeId);
-        if (cIt == remappedConsumeByLoc.end())
-            continue;
-
-        const Version consumeV = cIt->second;
-        if (consumeV == LOPA::invalidVersion || yieldV == LOPA::invalidVersion)
-            continue;
-
-        const bool consumeYieldConsistent = (consumeV == yieldV);
-        if (consumeYieldConsistent)
-            continue;
-
-        pta.pendingStoreObjsByLoc[storeId].push_back(obj);
-    }
-
     // Map consume/yield/reliance after shrink.
     for (const std::pair<NodeID, Version> &lv : remappedConsumes)
         pta.setConsume(lv.first, obj, lv.second);
@@ -860,7 +870,7 @@ void LOPA::VDGBuildContext::shrinkAndPublish()
         profile.step4Ticks += pta.stat->getClk(true) - step4StartTicks;
 }
 
-void LOPA::VDGBuildContext::buildObject(NodeID o, const NodeVector &starts,
+void LOPAFrontend::VDGBuildContext::buildObject(NodeID o, const NodeVector &starts,
                                         const std::vector<VDGSimplifyPass> &passes)
 {
     if (enableProfile)
@@ -876,10 +886,12 @@ void LOPA::VDGBuildContext::buildObject(NodeID o, const NodeVector &starts,
     shrinkAndPublish();
 }
 
-void LOPA::VDGBuildContext::printSummary() const
+void LOPAFrontend::VDGBuildContext::printSummary() const
 {
     if (!enableProfile)
         return;
+
+    if (pta.offlineConsumer) exportedStats.dump();
 
     SVFUtil::outs()
         << "buildVDG.hot.summary\tobjects:" << profile.objects
@@ -911,7 +923,7 @@ void LOPA::VDGBuildContext::printSummary() const
     }
 }
 
-void LOPA::prelabel(void)
+void LOPAFrontend::prelabel(void)
 {
     // 由 Load 节点出发
     double start = stat->getClk(true);
@@ -996,12 +1008,11 @@ void LOPA::prelabel(void)
     }
 }
 
-void LOPA::buildVDG(StoreEdgePolicy storeEdges)
+void LOPAFrontend::buildVDG(StoreEdgePolicy storeEdges)
 {
     const double labelStart = stat->getClk(true);
 
     vdgManager.clear();
-    pendingStoreObjsByLoc.clear();
     consume.clear();
     yield.clear();
 
@@ -1047,22 +1058,6 @@ void LOPA::buildVDG(StoreEdgePolicy storeEdges)
     }
     // Release reverse delta cache after build loop completes.
     Map<NodeID, NodeVector>().swap(ctx.deltaSrcCacheByDst);
-
-    if (Options::VDGStat())
-    {
-        size_t pendingStores = 0;
-        size_t pendingEntries = 0;
-        size_t pendingMax = 0;
-        for (const auto &kv : pendingStoreObjsByLoc)
-        {
-            ++pendingStores;
-            pendingEntries += kv.second.size();
-            pendingMax = std::max(pendingMax, kv.second.size());
-        }
-        SVFUtil::outs() << "pendingStore.summary\tstores:" << pendingStores
-                        << " entries:" << pendingEntries
-                        << " maxPerStore:" << pendingMax << "\n";
-    }
 
     const double totalEndTicks = stat->getClk(true);
     vdgBuildTime = (totalEndTicks - labelStart) / TIMEINTERVAL;

@@ -1,12 +1,6 @@
 //===- LOPAVSFS.h -- LOPA frontend + VSFS-style propagation backend --------//
 //
-// Ablation variant "B": reuse LOPA's offline compression frontend
-// (prelabel + buildVDG) unchanged, but solve with the VSFS object-version
-// propagation algorithm instead of LOPA's VDG batch solver.
-//
-// The solver half is a faithful port of VersionedFlowSensitive's propagation
-// (propagateVersion / processLoad / processStore / processNode /
-// updateConnectedNodes). Online VDG SCC contraction is deliberately not used.
+// Uses the shared VDG frontend and VSFS object-version propagation.
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,7 +8,7 @@
 #define LOPAVSFS_H_
 
 #include "Graphs/SVFGNode.h"
-#include "WPA/LOPA.h"
+#include "WPA/LOPAFrontend.h"
 
 namespace SVF
 {
@@ -22,7 +16,7 @@ namespace SVF
 /*!
  * LOPA frontend (offline compression) with a VSFS-style propagation backend.
  */
-class LOPAVSFS : public LOPA
+class LOPAVSFS : public LOPAFrontend
 {
     friend class LOPAVSFSStat;
 
@@ -34,6 +28,9 @@ public:
 
     virtual void initialize() override;
     virtual void finalize() override;
+    void readPtsFromFile(const std::string& filename) override;
+    void solveAndwritePtsToFile(const std::string& filename) override;
+
 
     /// Get PTA name
     const std::string PTAName() const override
@@ -69,12 +66,6 @@ public:
         lopavsfs = nullptr;
     }
 
-    /// Versus LOPA, online compression is disabled for this variant.
-    bool usesOnlineCompression() const
-    {
-        return false;
-    }
-
 protected:
     bool processLoad(const LoadSVFGNode* load) override;
     bool processStore(const StoreSVFGNode* store) override;
@@ -82,7 +73,7 @@ protected:
     void processNode(NodeID n) override;
     void updateConnectedNodes(const SVFGEdgeSetTy& newEdges) override;
 
-    /// Revert LOPA's priority worklists to the base FIFO worklist.
+    /// Schedule SVFG and version-propagation nodes on the FIFO worklist.
     void pushIntoWorklist(NodeID id) override;
     void solveWorklist() override;
     void solveConstraints() override;
@@ -121,6 +112,10 @@ protected:
     }
 
 private:
+    void writeVersionedAnalysisResultToFile(const std::string& filename);
+    void readVersionedAnalysisResultFromFile(std::ifstream& input);
+    double versionPropTime = 0;
+
     /// Translate the materialized LOPA frontend (compressed VDGs, consume/yield,
     /// per-node stmt reliance) into the VSFS propagation structures.
     void buildVFSStructures();

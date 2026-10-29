@@ -512,6 +512,18 @@ private:
 //===----------------------------------------------------------------------===//
 // VDGManager - owns all per-object VDGs.
 //===----------------------------------------------------------------------===//
+/// Incremental summary shared by retained and streaming VDG frontends.
+class VDGStats {
+public:
+    void add(const VDG& graph);
+    void dump() const;
+private:
+    size_t totalVDGs = 0, totalSuperNodes = 0;
+    size_t totalEdges = 0, totalSolidEdges = 0, totalVirtualEdges = 0;
+    size_t minNodes = size_t(-1), maxNodes = 0, totalLoadConsumeNodes = 0;
+    OrderedMap<size_t, size_t> nodesToObjCount;
+};
+
 class VDGManager
 {
 public:

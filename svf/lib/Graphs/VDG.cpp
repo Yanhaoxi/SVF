@@ -1345,67 +1345,42 @@ void VDGManager::enterSolveAll()
     pendingVDGs.clear();
 }
 
-void VDGManager::dumpStats() const
+void VDGStats::add(const VDG& graph)
 {
-    if (vdgMap.empty())
-        return;
+    ++totalVDGs;
 
-    size_t totalVDGs = 0;
-    size_t totalSuperNodes = 0;
-    size_t totalEdges = 0;
-    size_t totalSolidEdges = 0;
-    size_t totalVirtualEdges = 0;
-    size_t minNodes = std::numeric_limits<size_t>::max();
-    size_t maxNodes = 0;
-    // Stmt reliance is bound exactly to load-consume versions (see
-    // VDGBuildContext::getOrCreateConsumeVersion / materializeAndSimplify), and
-    // both flags propagate identically through DSU and SCC merges. So every
-    // load-consume supernode carries a non-empty reliance set and vice versa;
-    // one counter is enough.
-    size_t totalLoadConsumeNodes = 0;
-    OrderedMap<size_t, size_t> nodesToObjCount;
+    const size_t nodeCount = countNodes(graph);
 
-    for (const auto& entry : vdgMap)
+    graph.forEachSuperNode([&](Version, VDGNode* node)
     {
-        const VDG* graph = entry.second.get();
-        if (!graph)
-            continue;
-
-        ++totalVDGs;
-
-        const size_t nodeCount = countNodes(*graph);
-
-        graph->forEachSuperNode([&](Version, VDGNode* node)
+        if (node->isLoadConsume())
+            ++totalLoadConsumeNodes;
+        for (Version dst : node->getSolidOut())
         {
-            if (node->isLoadConsume())
-                ++totalLoadConsumeNodes;
-            for (Version dst : node->getSolidOut())
+            if (graph.hasVersion(dst) && graph.isSuperVersion(dst))
             {
-                if (graph->hasVersion(dst) && graph->isSuperVersion(dst))
-                {
-                    ++totalEdges;
-                    ++totalSolidEdges;
-                }
+                ++totalEdges;
+                ++totalSolidEdges;
             }
-            for (Version dst : node->getVirtualOut())
+        }
+        for (Version dst : node->getVirtualOut())
+        {
+            if (graph.hasVersion(dst) && graph.isSuperVersion(dst))
             {
-                if (graph->hasVersion(dst) && graph->isSuperVersion(dst))
-                {
-                    ++totalEdges;
-                    ++totalVirtualEdges;
-                }
+                ++totalEdges;
+                ++totalVirtualEdges;
             }
-        });
+        }
+    });
 
-        totalSuperNodes += nodeCount;
-        nodesToObjCount[nodeCount] += 1;
-        minNodes = std::min(minNodes, nodeCount);
-        maxNodes = std::max(maxNodes, nodeCount);
-    }
+    totalSuperNodes += nodeCount;
+    nodesToObjCount[nodeCount] += 1;
+    minNodes = std::min(minNodes, nodeCount);
+    maxNodes = std::max(maxNodes, nodeCount);
+}
 
-    if (totalVDGs == 0)
-        return;
-
+void VDGStats::dump() const
+{
     SVFUtil::outs() << "# VDG stats\n";
     SVFUtil::outs() << "  graphs: " << totalVDGs << "\n";
     SVFUtil::outs() << "  total_supernodes: " << totalSuperNodes << "\n";
@@ -1413,12 +1388,22 @@ void VDGManager::dumpStats() const
     SVFUtil::outs() << "  total_edges: " << totalEdges << "\n";
     SVFUtil::outs() << "  solid_edges: " << totalSolidEdges << "\n";
     SVFUtil::outs() << "  virtual_edges: " << totalVirtualEdges << "\n";
-    SVFUtil::outs() << "  min_supernodes: " << minNodes << "\n";
+    SVFUtil::outs() << "  min_supernodes: " << (totalVDGs ? minNodes : 0) << "\n";
     SVFUtil::outs() << "  max_supernodes: " << maxNodes << "\n";
-    SVFUtil::outs() << "  avg_supernodes: " << (static_cast<double>(totalSuperNodes) / totalVDGs) << "\n";
+    SVFUtil::outs() << "  avg_supernodes: " << (totalVDGs ? static_cast<double>(totalSuperNodes) / totalVDGs : 0) << "\n";
     SVFUtil::outs() << "  supernodes->objs:\n";
     for (const auto& kv : nodesToObjCount)
         SVFUtil::outs() << "    " << kv.first << " : " << kv.second << "\n";
+
+}
+
+void VDGManager::dumpStats() const
+{
+    if (vdgMap.empty()) return;
+    VDGStats summary;
+    for (const auto& entry : vdgMap)
+        if (entry.second) summary.add(*entry.second);
+    summary.dump();
 }
 
 void VDGManager::writeToFile(const std::string& filename) const

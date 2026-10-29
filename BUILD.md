@@ -1,8 +1,12 @@
-# Building this SVF fork (VDG / versioned flow-sensitive branch)
+# Building LOPA
 
 This tree is a fork of [SVF](https://github.com/SVF-tools/SVF) that adds the
-version dependency graph (VDG) and load-observable flow-sensitive pointer analysis. The
-branch was developed against **LLVM 16**, not the LLVM 18 used by upstream SVF.
+version dependency graph (VDG) and load-observable flow-sensitive pointer analysis.
+In `code/lopa_new`, `-lopa` selects the LOPA solver (PUS scheduling) with a fixed Andersen Wave
+preanalysis. VDG construction keeps early merge DSU, then exports simplified
+states into a Copy-only graph. Virtual edges are used during offline
+simplification; GEP keeps SVF's object and field transfer rules.
+This branch uses **LLVM 16**.
 
 Analysis modes, common options and validation commands are documented in
 [LOPA 与 CG 使用说明](docs/cg-integration.md).
@@ -14,9 +18,9 @@ Analysis modes, common options and validation commands are documented in
 | `svf/`       | SVF core library (analysis, graphs incl. `Graphs/VDG.*`)          |
 | `svf-llvm/`  | LLVM front-end, tools (`wpa`, `mta`, `saber`, ...), `extapi.c`    |
 | `cmake/`     | CMake modules (incl. `Modules/FindZ3.cmake`)                      |
-| `docs/`      | [LOPA 与 CG 使用说明](docs/cg-integration.md)                     |
+| `docs/`      | [LOPA 与 CG 使用说明](docs/cg-integration.md)                 |
 | `tests/solver/` | analysis regressions, see [README](tests/solver/README.md)    |
-| `tests/graph/` | VDG regressions, see [README](tests/graph/README.md)            |
+| `tests/graph/` | VDG and solver-container regressions, see [README](tests/graph/README.md) |
 
 ## Dependencies
 
@@ -38,20 +42,22 @@ sudo apt install \
 ```bash
 export LLVM_DIR=/usr/lib/llvm-16/lib/cmake/llvm
 
-cmake -S . -B Release-build \
+cmake -S . -B PUS-build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang-16 \
   -DCMAKE_CXX_COMPILER=clang++-16 \
   -DCMAKE_CXX_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13" \
   -DCMAKE_C_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13" \
   -DSVF_WARN_AS_ERROR=OFF \
+  -DSVF_ENABLE_ASSERTIONS=OFF \
+  -DBUILD_SHARED_LIBS=OFF \
   -DLLVM_DIR=$LLVM_DIR
 
-cmake --build Release-build -j"$(nproc)"
+cmake --build PUS-build --target wpa -j 24
 ```
 
-Artifacts: `Release-build/bin/wpa` and friends, libraries under
-`Release-build/lib/`, generated `Release-build/lib/extapi.bc`.
+Artifacts: `PUS-build/bin/wpa`, libraries under `PUS-build/lib/`, and
+`PUS-build/lib/extapi.bc`.
 
 ### Toolchain caveats
 
@@ -71,25 +77,24 @@ Artifacts: `Release-build/bin/wpa` and friends, libraries under
 ## Run
 
 ```bash
-./Release-build/bin/wpa -lopa -vdg-stat -vdg-pass-order=SPC \
-  -extapi=./Release-build/lib/extapi.bc \
+./PUS-build/bin/wpa -lopa -ptd=persistent -node-alloc-strat=dense \
+  -lopa-cg-store-policy=deferred \
+  -extapi=./PUS-build/lib/extapi.bc \
   /home/yhx/PTA/labv1/test/soundness/simple/fs-load-cache-alias-loop.ll
 ```
 
 Useful options:
 
-- `-lopa` – LOPA: load-observable versioned flow-sensitive analysis
+- `-lopa` – LOPA
+- `-lopa-cgfspta` – LOPA with the CG Wave backend; add `-cg-sfr=true` for CG SFR
+- `-lopa-vsfs` – LOPA with the VSFS backend
 - `-fspta` – upstream flow-sensitive analysis (baseline)
 - `-vdg-stat` – print VDG statistics
 - `-vdg-pass-order=SPC` – VDG simplification pass order (e.g. `SPC`, `SPCBLC`)
-- `-vdg-pass-profile=on` – report pass-pattern opportunity coverage on the
-  non-materialized estimation graph
-- `-vdg-pass-profile="kill=1,0;order=,S,SPC,B"` – sweep the estimation graph:
-  for each `(kill, order)` configuration, apply the strategy (letters
-  `S`=scc, `P`=prune, `C`=chain, `B`=VSFS-style store-side seed merge,
-  `L`=its load-side dual; empty = none) and print
-  `vdg.passprofile.config.summary` / `.pass` with N0/N1 node and edge counts and
-  per-pass time. `kill` selects `-lopa-obj-fs-lower-bound`. Note: the
-  VSFS-style comparison uses `B` only; `L` is LOPA's added dual.
-- `-ptd=mutable` – points-to data structure variant
-- `-dump-vdg` / `-vdg-out=<path>` – dump the VDG as dot
+- `-lopa-cg-store-policy=deferred|object-lower-bound` – Store preservation policy
+  for PUS and LOPA+CG; use the same policy in comparisons
+- `-ptd=persistent -node-alloc-strat=dense` – shared experiment configuration
+
+PUS and LOPA+CG require `-pre-field-sensitive=true`, `-opt-svfg=false`, and an
+empty `-vdg-pass-profile` value, which are the defaults. Keep the build settings,
+extapi file, field options and Store policy identical across compared modes.

@@ -38,6 +38,15 @@ using namespace SVF;
 using namespace SVFUtil;
 using namespace std;
 
+namespace
+{
+// The first and last member differ exactly when a component has multiple members.
+bool hasMultipleMembers(const NodeBS& members)
+{
+    return members.find_first() != members.find_last();
+}
+}
+
 
 u32_t AndersenBase::numOfProcessedAddr = 0;
 u32_t AndersenBase::numOfProcessedCopy = 0;
@@ -556,7 +565,11 @@ bool Andersen::processLoad(NodeID node, const ConstraintEdge* load)
     ///       make gcc in spec 2000 pass the flow-sensitive analysis.
     ///       Try to handle black hole obj in an appropriate way.
 //	if (pag->isBlkObjOrConstantObj(node))
-    if (pag->isConstantObj(node) || pag->getGNode(load->getDstID())->isPointer() == false)
+    // A merged endpoint can have a non-pointer representative.
+    // Use accumulated members, including earlier SCC and field merges.
+    if (pag->isConstantObj(node) ||
+        (!pag->getGNode(load->getDstID())->isPointer() &&
+         !hasMultipleMembers(sccSubNodes(load->getDstID()))))
         return false;
 
     numOfProcessedLoad++;
@@ -576,7 +589,11 @@ bool Andersen::processStore(NodeID node, const ConstraintEdge* store)
     ///       make gcc in spec 2000 pass the flow-sensitive analysis.
     ///       Try to handle black hole obj in an appropriate way
 //	if (pag->isBlkObjOrConstantObj(node))
-    if (pag->isConstantObj(node) || pag->getGNode(store->getSrcID())->isPointer() == false)
+    // A merged endpoint can have a non-pointer representative.
+    // Use accumulated members, including earlier SCC and field merges.
+    if (pag->isConstantObj(node) ||
+        (!pag->getGNode(store->getSrcID())->isPointer() &&
+         !hasMultipleMembers(sccSubNodes(store->getSrcID()))))
         return false;
 
     numOfProcessedStore++;
@@ -718,6 +735,11 @@ void Andersen::mergeSccCycle()
         const NodeBS& subNodes = getSCCDetector()->subNodes(repNodeId);
         // merge sub nodes to rep node
         mergeSccNodes(repNodeId, subNodes);
+        if (subNodes.count() > 1)
+        {
+            pushIntoWorklist(repNodeId);
+            reanalyze = true;
+        }
     }
 }
 

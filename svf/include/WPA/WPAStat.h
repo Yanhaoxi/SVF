@@ -33,7 +33,7 @@
 
 #include "Util/PTAStat.h"
 #include "WPA/FlowSensitive.h"
-#include "WPA/LOPA.h"
+#include "WPA/LOPAVSFS.h"
 #include "WPA/VersionedFlowSensitive.h"
 
 namespace SVF
@@ -163,19 +163,19 @@ private:
     u32_t _NumOfAddrTakeVar;	///< number of occurrences of addr-taken variables in load/store.
 };
 
-class LOPAStat : public PTAStat
+class LOPAVSFSStat : public PTAStat
 {
 public:
-    LOPA *lopa;
+    LOPAVSFS *lopa;
 
-    LOPAStat(LOPA* pta): PTAStat(pta)
+    LOPAVSFSStat(LOPAVSFS* pta): PTAStat(pta)
     {
         lopa = pta;
         clearStat();
         startClk();
     }
 
-    virtual ~LOPAStat() { }
+    virtual ~LOPAVSFSStat() { }
 
     virtual void performStat();
 

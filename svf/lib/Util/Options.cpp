@@ -271,6 +271,12 @@ const Option<bool> Options::LOPANoOffline(
     false
 );
 
+const Option<bool> Options::LOPAProfile(
+    "lopa-profile",
+    "Report LOPA CPU time at phase boundaries (diagnostic runs only)",
+    false
+);
+
 // Base class of pointer analyses (PointerAnalysis.cpp)
 const Option<bool> Options::TypePrint(
     "print-type",

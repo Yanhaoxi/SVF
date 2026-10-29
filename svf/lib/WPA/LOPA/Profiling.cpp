@@ -1,8 +1,8 @@
-//===- Profiling.cpp -- VDG pass-pattern profiling for LOPA ---------------//
+//===- Profiling.cpp -- VDG pass-pattern profiling for LOPAFrontend ---------------//
 
 #include "Util/GeneralType.h"
 #include "WPA/Andersen.h"
-#include "WPA/LOPA.h"
+#include "WPA/LOPAFrontend.h"
 #include "Util/Options.h"
 #include "MemoryModel/PointsTo.h"
 #include <algorithm>
@@ -1438,7 +1438,7 @@ namespace
 
     } // namespace
 
-void runSVFGPassProfiling(const LOPA &pta, const SVFG *svfg)
+void runSVFGPassProfiling(const LOPAFrontend &pta, const SVFG *svfg)
     {
         if (svfg == nullptr)
             return;

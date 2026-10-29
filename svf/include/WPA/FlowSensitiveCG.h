@@ -29,7 +29,6 @@ private:
     static constexpr CellID invalidCell = ~CellID(0);
     struct Cell {
         CellID rep;
-        PointsTo pts, sent;
         NodeBS copies;
         std::vector<const GepSVFGNode*> geps;
         std::vector<const SVFGNode*> indirect;
@@ -44,6 +43,9 @@ private:
         NodeID singleton = 0;
     };
     std::deque<Cell> cells;
+    // CellID keys are separate from the PAG IDs in the inherited result ptD.
+    // Both full sets and propagation deltas use the selected -ptd backend.
+    std::unique_ptr<DiffPTDataTy> cellPts;
     std::unordered_map<NodeID, CellID> values;
     std::unordered_map<uint64_t, CellID> memory;
     std::unordered_map<NodeID, StoreState> stores;
@@ -63,6 +65,7 @@ private:
     CGSFR::Schedule sfrSchedule;
     uint64_t sccVisited = 0, strideVisited = 0, positiveCycles = 0;
     uint64_t strideCount = 0, expansionCalls = 0, strideFacts = 0;
+    uint64_t newFIObjects = 0;
     size_t copyCount = 0, mergedCount = 0, rounds = 0;
     double constructionTime = 0;
     double offlineTime = 0, exportTime = 0;
@@ -74,6 +77,7 @@ private:
     CellID memoryCell(NodeID location, NodeID object, bool output = false);
     void enqueue(CellID id);
     bool join(CellID id, const PointsTo& pts);
+    bool join(CellID dst, CellID src);
     void addCopy(CellID src, CellID dst);
     void addPhi(const PHISVFGNode* phi);
     void addSVFGEdge(const SVFGEdge* edge);

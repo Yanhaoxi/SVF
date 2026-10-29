@@ -1,16 +1,19 @@
 //===- LOPAVSFS.cpp -- LOPA frontend + VSFS-style propagation backend ------//
 //
-// Ablation variant "B". It reuses LOPA's offline compression frontend and
-// replaces the solver with the VSFS object-version propagation algorithm.
-// The propagation half is a faithful port of VersionedFlowSensitive's solver
-// (see code/svf/svf/lib/WPA/VersionedFlowSensitive.cpp).
+// VSFS object-version propagation over the shared LOPA offline frontend.
 //
 //===----------------------------------------------------------------------===//
 
 #include "WPA/LOPAVSFS.h"
+#include "WPA/WPAStat.h"
 #include "Util/Options.h"
+#include "Util/SVFUtil.h"
+#include "MemoryModel/PointsTo.h"
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <system_error>
 
 using namespace SVF;
 using namespace SVFUtil;
@@ -18,18 +21,17 @@ using namespace SVFUtil;
 LOPAVSFS *LOPAVSFS::lopavsfs = nullptr;
 
 LOPAVSFS::LOPAVSFS(SVFIR *_pag, PTATY type)
-    : LOPA(_pag, type), versionedPTD(nullptr)
+    : LOPAFrontend(_pag, type), versionedPTD(nullptr)
 {
 }
 
 void LOPAVSFS::initialize()
 {
-    // Run LOPA's frontend exactly as-is: prelabel + buildVDG (construction,
-    // offline compression, shrink/publish of consume/yield and stmt reliance),
-    // enterSolveAll and removeAllIndirectSVFGEdges.
-    LOPA::initialize();
-
+    FlowSensitive::initialize();
+    delete stat;
+    stat = new LOPAVSFSStat(this);
     versionedPTD = getVersionedPTDataTy();
+    initializeVDG();
 
     const double translateStart = stat->getClk(true);
     buildVFSStructures();
@@ -56,7 +58,7 @@ void LOPAVSFS::initialize()
 
 void LOPAVSFS::finalize()
 {
-    LOPA::finalize();
+    LOPAFrontend::finalize();
 }
 
 /*!
@@ -124,11 +126,8 @@ void LOPAVSFS::buildVFSStructures()
             if (l < numNodes)
                 vfsConsume[l][o] = lv.second;
 
-            // VSFS notifies both loads and stores when the consumed version of an
-            // object grows; LOPA's graph reliance is load-only because its own
-            // solver propagates preservation through VDG edges. This backend
-            // materializes preservation dynamically in processStore, so a store
-            // must be re-run when its consume version changes; register it here.
+            // Stores preserve incoming contents in processStore, so they must
+            // run again when their consumed version grows.
             if (isStore(l) && lv.second != invalidVersion)
                 stmtReliance[o][lv.second].set(l);
         }
@@ -203,8 +202,7 @@ void LOPAVSFS::processNode(NodeID n)
 
 bool LOPAVSFS::processGep(const GepSVFGNode* edge)
 {
-    // VSFS uses the base flow-sensitive gep handling; LOPA's delta-cache path
-    // is not part of this backend.
+    // Use SVF's field-sensitive GEP transfer.
     return FlowSensitive::processGep(edge);
 }
 
@@ -429,4 +427,434 @@ void LOPAVSFS::updateConnectedNodes(const SVFGEdgeSetTy& newEdges)
             }
         }
     }
+}
+
+//===- Versioned result I/O -----------------------------------------------//
+
+void LOPAVSFS::readPtsFromFile(const std::string& filename)
+{
+    /// Initialization for the Solver
+    initialize();
+    /// Load the pts from file
+    if(!filename.empty())
+    {
+        SVFUtil::outs() << "Loading versioned pointer analysis results from '" << filename << "'...";
+
+        std::ifstream F(filename.c_str());
+        if (!F.is_open())
+        {
+            SVFUtil::outs() << "  error opening file for reading!\n";
+            return ;
+        }
+        readAndSetObjFieldSensitivity(F,"------");
+
+        readVersionedAnalysisResultFromFile(F);
+
+        readPtsResultFromFile(F);
+
+        readGepObjVarMapFromFile(F);
+
+        readAndSetObjFieldSensitivity(F,"");
+
+        // Update callgraph
+        updateCallGraph(pag->getIndirectCallsites());
+
+        F.close();
+        SVFUtil::outs() << "\n";
+    }
+
+    /// finalize the analysis
+    finalize();
+}
+
+void LOPAVSFS::solveAndwritePtsToFile(const std::string& filename)
+{
+    /// Initialization for the Solver
+    initialize();
+    if(!filename.empty())
+        writeObjVarToFile(filename);
+    solveConstraints();
+    if(!filename.empty())
+    {
+        writeVersionedAnalysisResultToFile(filename);
+        writeToFile(filename);
+    }
+    /// finalize the analysis
+    finalize();
+}
+
+void LOPAVSFS::writeVersionedAnalysisResultToFile(const std::string& filename)
+{
+    SVFUtil::outs() << "Storing Versioned Analysis Result to '" << filename << "'...";
+    std::error_code err;
+    std::fstream f(filename.c_str(), std::ios_base::app);
+    if (!f.good())
+    {
+        SVFUtil::outs() << "  error opening file for writing!\n";
+        return;
+    }
+
+    for (const LOPAVSFS::ObjToLocVersionMap *lvm :
+         {
+             &this->consume, &this->yield
+         })
+    {
+        for (const LOPAVSFS::ObjToLocVersionMap::value_type &ovm : *lvm)
+        {
+            const NodeID o = ovm.first;
+            if (!ovm.second) continue;
+            for (const LOPAVSFS::LocToVersionMap::value_type &lv : *(ovm.second))
+            {
+                const Version v = lv.second;
+                if (versionedPTD->getPts(atKey(o, v)).empty()) continue;
+
+                f <<"[ " <<o <<" " <<v<<" ]"<< " -> { ";
+                const PointsTo &ovPts = versionedPTD->getPts(atKey(o, v));
+                if (!ovPts.empty())
+                {
+                    for (NodeID n: ovPts)
+                    {
+                        f << n << " ";
+                    }
+                }
+                else
+                {
+                    f << " ";
+                }
+                f << "}\n";
+            }
+        }
+    }
+
+    f << "---VERSIONED---\n";
+
+    f.close();
+    if (f.good())
+    {
+        SVFUtil::outs() << "\n";
+        return;
+    }
+}
+
+void LOPAVSFS::readVersionedAnalysisResultFromFile(std::ifstream& F)
+{
+    std::string line;
+    std::string delimiter1 = " -> { ";
+    std::string delimiter2 = " }";
+    while (F.good())
+    {
+        // Parse a single line in the form of "[ var version ] -> { obj1 obj2 obj3 }"
+        getline(F, line);
+        if (line == "---VERSIONED---")     break;
+        std::string pair = line.substr(line.find("[ ")+1, line.find(" ]"));
+
+        // Parse VersionKey
+        std::istringstream ss(pair);
+        NodeID nodeID;
+        Version nodeVersion;
+        ss>> nodeID >> nodeVersion;
+        VersionedVar keyPair = atKey(nodeID,nodeVersion);
+
+        // Parse Point-to set
+        size_t pos = line.find(delimiter1);
+        if (pos == std::string::npos)    break;
+        if (line.back() != '}')     break;
+        pos = pos + delimiter1.length();
+        size_t len = line.length() - pos - delimiter2.length();
+        std::string objs = line.substr(pos, len);
+        PointsTo dstPts;
+        if (!objs.empty())
+        {
+            std::istringstream pt(objs);
+            NodeID obj;
+            while (pt.good())
+            {
+                pt >> obj;
+                dstPts.set(obj);
+            }
+        }
+
+        // union point-to reuslt
+        versionedPTD->unionPts(keyPair, dstPts);
+    }
+
+}
+
+//===- Statistics (original implementation: mbarbar, 2020) -----------------//
+
+void LOPAVSFSStat::clearStat()
+{
+    _NumVersions         = 0;
+    _MaxVersions         = 0;
+    _NumNonEmptyVersions = 0;
+    _NumSingleVersion    = 0;
+    _NumUsedVersions     = 0;
+    _NumEmptyVersions    = 0;
+    _MaxPtsSize          = 0;
+    _MaxTopLvlPtsSize    = 0;
+    _MaxVersionPtsSize   = 0;
+    _TotalPtsSize        = 0;
+    _AvgPtsSize          = 0.0;
+    _AvgTopLvlPtsSize    = 0.0;
+    _AvgVersionPtsSize   = 0.0;
+    // Equivalent-object statistics
+    _NumEquivClasses     = 0;
+    _TotalEquivObjs      = 0;
+    _NumSingletonClasses = 0;
+    _MaxEquivClassSize   = 0;
+}
+
+void LOPAVSFSStat::performStat()
+{
+    // Largely based on that in FlowSensitiveStat. Would be better to split the FSStat version
+    // and reuse code rather than copy.
+    assert(SVFUtil::isa<LOPAVSFS>(lopa) && "LOPAVSFSStat::performStat: not given LOPA.");
+    endClk();
+
+    clearStat();
+
+    SVFIR *pag = lopa->getPAG();
+
+    versionStat();
+    ptsSizeStat();
+    equivalentObjStat();
+
+    u32_t fiObjNumber = 0;
+    u32_t fsObjNumber = 0;
+    Set<NodeID> nodeSet;
+    for (SVFIR::const_iterator it = pag->begin(); it != pag->end(); ++it)
+    {
+        NodeID nodeId = it->first;
+        PAGNode* pagNode = it->second;
+        if (SVFUtil::isa<ObjVar>(pagNode))
+        {
+            const BaseObjVar* baseObj = pag->getBaseObject(nodeId);
+            NodeID baseId = baseObj->getId();
+            if (nodeSet.insert(baseId).second)
+            {
+                if (baseObj->isFieldInsensitive()) fiObjNumber++;
+                else fsObjNumber++;
+            }
+        }
+    }
+
+    PTNumStatMap["FIObjNum"] = fiObjNumber;
+    PTNumStatMap["FSObjNum"] = fsObjNumber;
+
+    unsigned numOfCopy = 0;
+    unsigned numOfStore = 0;
+    for (SVFG::iterator it = lopa->svfg->begin(); it != lopa->svfg->end(); ++it)
+    {
+        SVFGNode* svfgNode = it->second;
+        if (SVFUtil::isa<CopySVFGNode>(svfgNode)) numOfCopy++;
+        else if (SVFUtil::isa<StoreSVFGNode>(svfgNode)) numOfStore++;
+    }
+
+    PTAStat::performStat();
+
+    timeStatMap["TotalTime"]    = (endTime - startTime)/TIMEINTERVAL;
+    timeStatMap["SolveTime"]          = lopa->solveTime;
+    timeStatMap["SCCTime"]            = lopa->sccTime;
+    timeStatMap["ProcessTime"]        = lopa->processTime;
+    timeStatMap["PropagationTime"]    = lopa->propagationTime;
+    timeStatMap["DirectPropaTime"]    = lopa->directPropaTime;
+    timeStatMap["IndirectPropaTime"]  = lopa->indirectPropaTime;
+    timeStatMap["Strong/WeakUpdTime"] = lopa->updateTime;
+    timeStatMap["AddrTime"]           = lopa->addrTime;
+    timeStatMap["CopyTime"]           = lopa->copyTime;
+    timeStatMap["GepTime"]            = lopa->gepTime;
+    timeStatMap["LoadTime"]           = lopa->loadTime;
+    timeStatMap["StoreTime"]          = lopa->storeTime;
+    timeStatMap["UpdateCGTime"]       = lopa->updateCallGraphTime;
+    timeStatMap["PhiTime"]            = lopa->phiTime;
+    timeStatMap["PrelabelingTime"]    = lopa->prelabelingTime;
+    timeStatMap["VersionPropTime"]    = lopa->versionPropTime;
+    timeStatMap["VDGBuildTime"]       = lopa->vdgBuildTime;
+
+    PTNumStatMap["TotalPointers"]  = pag->getValueNodeNum();
+    PTNumStatMap["TotalObjects"]   = pag->getObjectNodeNum();
+
+    PTNumStatMap["Pointers"]         = pag->getValueNodeNum();
+    PTNumStatMap["MemObjects"]       = pag->getObjectNodeNum();
+    PTNumStatMap["DummyFieldPtrs"] = pag->getFieldValNodeNum();
+    PTNumStatMap["FieldObjs"]  = pag->getFieldObjNodeNum();
+
+    PTNumStatMap["TotalVersions"]     = _NumVersions;
+    PTNumStatMap["MaxVersionsForObj"] = _MaxVersions;
+    PTNumStatMap["TotalNonEmptyVPts"] = _NumNonEmptyVersions;
+    PTNumStatMap["TotalEmptyVPts"]    = _NumEmptyVersions;
+    PTNumStatMap["TotalExistingVPts"] = _NumUsedVersions;
+    PTNumStatMap["TotalSingleVObjs"]  = _NumSingleVersion;
+
+    PTNumStatMap["EquivObjClasses"]    = _NumEquivClasses;
+    PTNumStatMap["TotalEquivObjs"]     = _TotalEquivObjs;
+    PTNumStatMap["SingletonClasses"]   = _NumSingletonClasses;
+    PTNumStatMap["MaxEquivClassSize"]  = _MaxEquivClassSize;
+
+    PTNumStatMap["CopysNum"]  = numOfCopy;
+    PTNumStatMap["StoresNum"] = numOfStore;
+
+    PTNumStatMap["SolveIterations"] = lopa->numOfIteration;
+
+    PTNumStatMap["IndEdgeSolved"] = lopa->getNumOfResolvedIndCallEdge();
+
+    PTNumStatMap["StrongUpdates"] = lopa->svfgHasSU.count();
+    PTNumStatMap["PrelabelNodes"] = lopa->numPrelabelNodes;
+    PTNumStatMap["PrelabelFIObjs"] = lopa->numPrelabelFIObjs;
+
+    PTNumStatMap["MaxPtsSize"]        = _MaxPtsSize;
+    PTNumStatMap["MaxTopLvlPtsSize"]  = _MaxTopLvlPtsSize;
+    PTNumStatMap["MaxVersionPtsSize"] = _MaxVersionPtsSize;
+
+    timeStatMap["AvgPtsSize"]        = _AvgPtsSize;
+    timeStatMap["AvgTopLvlPtsSize"]  = _AvgTopLvlPtsSize;
+    timeStatMap["AvgVersionPtsSize"] = _AvgVersionPtsSize;
+
+    PTNumStatMap["ProcessedAddr"]     = lopa->numOfProcessedAddr;
+    PTNumStatMap["ProcessedCopy"]     = lopa->numOfProcessedCopy;
+    PTNumStatMap["ProcessedGep"]      = lopa->numOfProcessedGep;
+    PTNumStatMap["ProcessedLoad"]     = lopa->numOfProcessedLoad;
+    PTNumStatMap["ProcessedStore"]    = lopa->numOfProcessedStore;
+    PTNumStatMap["ProcessedPhi"]      = lopa->numOfProcessedPhi;
+    PTNumStatMap["ProcessedAParam"]   = lopa->numOfProcessedActualParam;
+    PTNumStatMap["ProcessedFRet"]     = lopa->numOfProcessedFormalRet;
+    PTNumStatMap["ProcessedMSSANode"] = lopa->numOfProcessedMSSANode;
+
+    PTNumStatMap["NumOfNodesInSCC"] = lopa->numOfNodesInSCC;
+    PTNumStatMap["MaxSCCSize"]      = lopa->maxSCCSize;
+    PTNumStatMap["NumOfSCC"]        = lopa->numOfSCC;
+    timeStatMap["AverageSCCSize"]   = (lopa->numOfSCC == 0) ? 0 :
+                                      ((double)lopa->numOfNodesInSCC / lopa->numOfSCC);
+
+    PTAStat::printStat("Versioned Flow-Sensitive Pointer Analysis Statistics");
+}
+
+void LOPAVSFSStat::versionStat(void)
+{
+    // TODO! Need to merge yield/consume.
+    _NumSingleVersion = 0;
+    _MaxVersions = 0;
+
+    // Build per-object unique-version cardinality across consume/yield maps.
+    // This fixes MaxVersionsForObj (and TotalSingleVObjs) being stuck at 0.
+    Set<NodeID> objects;
+    for (const LOPAFrontend::ObjToLocVersionMap::value_type &ovm : lopa->consume)
+        if (ovm.second) objects.insert(ovm.first);
+    for (const LOPAFrontend::ObjToLocVersionMap::value_type &ovm : lopa->yield)
+        if (ovm.second) objects.insert(ovm.first);
+
+    for (const NodeID o : objects)
+    {
+        Set<Version> objVersions;
+
+        const LOPAFrontend::ObjToLocVersionMap::const_iterator cIt = lopa->consume.find(o);
+        if (cIt != lopa->consume.end() && cIt->second)
+        {
+            for (const LOPAFrontend::LocToVersionMap::value_type &lv : *(cIt->second))
+            {
+                if (lv.second != LOPAFrontend::invalidVersion)
+                    objVersions.insert(lv.second);
+            }
+        }
+
+        const LOPAFrontend::ObjToLocVersionMap::const_iterator yIt = lopa->yield.find(o);
+        if (yIt != lopa->yield.end() && yIt->second)
+        {
+            for (const LOPAFrontend::LocToVersionMap::value_type &lv : *(yIt->second))
+            {
+                if (lv.second != LOPAFrontend::invalidVersion)
+                    objVersions.insert(lv.second);
+            }
+        }
+
+        const u32_t versionNum = static_cast<u32_t>(objVersions.size());
+        if (versionNum > _MaxVersions)
+            _MaxVersions = versionNum;
+        if (versionNum == 1)
+            ++_NumSingleVersion;
+    }
+
+    u32_t totalVersionPtsSize = 0;
+    for (const LOPAFrontend::ObjToLocVersionMap *lvm :
+            {
+                &lopa->consume, &lopa->yield
+            })
+    {
+        for (const LOPAFrontend::ObjToLocVersionMap::value_type &ovm : *lvm)
+        {
+            const NodeID o = ovm.first;
+            if (!ovm.second) continue;
+            for (const LOPAFrontend::LocToVersionMap::value_type &lv : *(ovm.second))
+            {
+                const Version v = lv.second;
+
+                ++_NumVersions;
+
+                // If the version was just over-approximate and never accessed, ignore.
+                // Use a non-inserting query so absent versions do not materialize
+                // empty points-to entries in the backing store.
+                const PointsTo *ovPtsPtr = lopa->versionedPTD->getPtsIfExists(lopa->atKey(o, v));
+                if (ovPtsPtr == nullptr || ovPtsPtr->empty()) continue;
+
+                const PointsTo &ovPts = *ovPtsPtr;
+                ++_NumNonEmptyVersions;
+
+                const u32_t ovPtsCount = static_cast<u32_t>(ovPts.count());
+                _TotalPtsSize += ovPtsCount;
+                totalVersionPtsSize += ovPtsCount;
+                if (ovPtsCount > _MaxVersionPtsSize) _MaxVersionPtsSize = ovPtsCount;
+            }
+        }
+    }
+
+    _NumUsedVersions = _NumNonEmptyVersions + _NumEmptyVersions;
+
+    if (_NumNonEmptyVersions != 0) _AvgVersionPtsSize = (double)totalVersionPtsSize / (double)_NumUsedVersions;
+
+    _TotalPtsSize += totalVersionPtsSize;
+}
+
+void LOPAVSFSStat::ptsSizeStat()
+{
+    u32_t totalValidTopLvlPointers = 0;
+    u32_t totalTopLvlPtsSize = 0;
+    for (SVFIR::iterator it = lopa->getPAG()->begin(); it != lopa->getPAG()->end(); ++it)
+    {
+        if (!lopa->getPAG()->isValidTopLevelPtr(it->second)) continue;
+
+        NodeID p = it->first;
+
+        totalValidTopLvlPointers++;
+
+        u32_t size = lopa->getPts(p).count();
+        totalTopLvlPtsSize += size;
+        if (size > _MaxTopLvlPtsSize) _MaxTopLvlPtsSize = size;
+    }
+
+    if (totalValidTopLvlPointers != 0) _AvgTopLvlPtsSize = (double)totalTopLvlPtsSize / (double)totalValidTopLvlPointers;
+
+    _TotalPtsSize += totalTopLvlPtsSize;
+
+    if (_NumNonEmptyVersions + totalValidTopLvlPointers != 0)
+    {
+        _AvgPtsSize = (double)_TotalPtsSize / (double)(_NumNonEmptyVersions + totalValidTopLvlPointers);
+    }
+
+    _MaxPtsSize = _MaxVersionPtsSize > _MaxTopLvlPtsSize ? _MaxVersionPtsSize : _MaxTopLvlPtsSize;
+}
+
+void LOPAVSFSStat::equivalentObjStat(void)
+{
+    // Equivalent-object dedup is disabled: each materialized object is its own class.
+    Set<NodeID> objects;
+    for (const LOPAFrontend::ObjToLocVersionMap::value_type &ov : lopa->consume)
+        objects.insert(ov.first);
+    for (const LOPAFrontend::ObjToLocVersionMap::value_type &ov : lopa->yield)
+        objects.insert(ov.first);
+
+    const u32_t total = static_cast<u32_t>(objects.size());
+    _TotalEquivObjs = total;
+    _NumEquivClasses = total;
+    _NumSingletonClasses = total;
+    _MaxEquivClassSize = total == 0 ? 0 : 1;
 }

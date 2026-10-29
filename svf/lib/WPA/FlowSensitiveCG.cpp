@@ -1,7 +1,7 @@
 #include "WPA/FlowSensitiveCG.h"
 #include "WPA/Andersen.h"
 #include "WPA/WPAStat.h"
-#include "WPA/LOPA.h"
+#include "WPA/LOPAFrontend.h"
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
@@ -40,6 +40,7 @@ public:
         timeStatMap["CGMemoryCells"] = cg->memory.size();
         timeStatMap["CGCopyEdgesInserted"] = cg->copyCount;
         timeStatMap["CGOnlineMergedCells"] = cg->mergedCount;
+        timeStatMap["CGNewFIObjects"] = cg->newFIObjects;
         timeStatMap["CGLiveCells"] = cg->cells.size() - cg->mergedCount;
         uint64_t liveEdges = 0;
         for (size_t id = 0; id < cg->cells.size(); ++id)
@@ -122,13 +123,16 @@ FlowSensitiveCG::CellID FlowSensitiveCG::memoryCell(NodeID location, NodeID obje
 }
 const PointsTo& FlowSensitiveCG::getPts(NodeID id) {
     if (resultExported) return BVDataPTAImpl::getPts(id);
-    return cells[representative(valueCell(id))].pts;
+    return cellPts->getPts(representative(valueCell(id)));
 }
 bool FlowSensitiveCG::unionPts(NodeID id, const PointsTo& pts) {
     if (resultExported) return BVDataPTAImpl::unionPts(id, pts);
     return join(valueCell(id), pts);
 }
-bool FlowSensitiveCG::unionPts(NodeID id, NodeID source) { return unionPts(id, getPts(source)); }
+bool FlowSensitiveCG::unionPts(NodeID id, NodeID source) {
+    if (resultExported) return BVDataPTAImpl::unionPts(id, source);
+    return join(valueCell(id), valueCell(source));
+}
 bool FlowSensitiveCG::addPts(NodeID id, NodeID object) {
     PointsTo singleton;
     singleton.set(object);
@@ -143,8 +147,15 @@ void FlowSensitiveCG::enqueue(CellID id) {
 }
 bool FlowSensitiveCG::join(CellID id, const PointsTo& pts) {
     id = representative(id);
-    if (!(cells[id].pts |= pts)) return false;
+    if (!cellPts->unionPts(id, pts)) return false;
     enqueue(id);
+    return true;
+}
+bool FlowSensitiveCG::join(CellID dst, CellID src) {
+    dst = representative(dst);
+    src = representative(src);
+    if (!cellPts->unionPts(dst, src)) return false;
+    enqueue(dst);
     return true;
 }
 void FlowSensitiveCG::addCopy(CellID src, CellID dst) {
@@ -156,7 +167,7 @@ void FlowSensitiveCG::addCopy(CellID src, CellID dst) {
     graphChanged = true;
     if (useSFR) sccCandidates.set(src);
     // New edges need the full source set, including previously propagated facts.
-    join(dst, cells[src].pts);
+    join(dst, src);
 }
 void FlowSensitiveCG::addPhi(const PHISVFGNode* phi) {
     const CellID dst = valueCell(phi->getRes()->getId());
@@ -214,10 +225,9 @@ void FlowSensitiveCG::compileLOPAMemory() {
         if (const auto* store = SVFUtil::dyn_cast<StoreSVFGNode>(entry.second))
             stores[store->getId()].node = store;
     const double start = stat->getClk(true);
-    LOPA frontend(pag);
-    frontend.exportOffline(svfg, ander, *this,
-        [&](NodeID object, const VDG& graph, const LOPA::LocToVersionMap& consumes,
-            const LOPA::LocToVersionMap& yields) {
+    LOPAFrontend::exportOffline(pag, svfg, ander, *this,
+        [&](NodeID object, const VDG& graph, const LOPAFrontend::LocToVersionMap& consumes,
+            const LOPAFrontend::LocToVersionMap& yields) {
             const double exportStart = stat->getClk(true);
             std::vector<CellID> versions(graph.capacity(), invalidCell);
             graph.forEachSuperNode([&](Version version, const VDGNode*) {
@@ -265,6 +275,10 @@ void FlowSensitiveCG::initialize() {
         std::exit(1);
     }
     FlowSensitive::initialize();
+    if (Options::ptDataBacking() == PTBackingType::Mutable)
+        cellPts = std::make_unique<MutDiffPTDataTy>(false);
+    else
+        cellPts = std::make_unique<PersDiffPTDataTy>(getPtCache(), false);
     delete stat;
     stat = new FlowSensitiveCGStat(this);
     // Match VSFS: TotalTime starts after shared Andersen/MSSA/SVFG work and
@@ -280,13 +294,12 @@ void FlowSensitiveCG::queueIndirect(const SVFGNode* node) {
 }
 void FlowSensitiveCG::solveCopies() {
     auto process = [&](CellID raw) {
-        const CellID id = representative(raw);
+        CellID id = representative(raw);
         if (raw != id || !cells[id].queued) return;
         Cell& cell = cells[id];
         cell.queued = false;
-        PointsTo delta = cell.pts - cell.sent;
-        if (delta.empty()) return;
-        cell.sent |= delta;
+        if (!cellPts->computeDiffPts(id, cellPts->getPts(id))) return;
+        const PointsTo& delta = cellPts->getDiffPts(id);
         for (CellID dst : cell.copies) join(dst, delta);
         for (const GepSVFGNode* gep : cell.geps) propagateGep(gep, delta);
         for (const SVFGNode* node : cell.indirect) queueIndirect(node);
@@ -307,7 +320,11 @@ void FlowSensitiveCG::propagateGep(const GepSVFGNode* gep, const PointsTo& delta
     for (NodeID object : delta) {
         if (isBlkObjOrConstantObj(object)) targets.set(object);
         else if (statement->isVariantFieldGep()) {
-            setObjFieldInsensitive(object);
+            // Keep the conversion local; count any object missed by preanalysis.
+            if (!isFieldInsensitive(object)) {
+                setObjFieldInsensitive(object);
+                ++newFIObjects;
+            }
             targets.set(getFIObjVar(object));
         } else if (isFieldInsensitive(object)) targets.set(object);
         else targets.set(getGepObjVar(object, statement->getAccessPath().getConstantStructFldIdx()));
@@ -430,13 +447,14 @@ void FlowSensitiveCG::collapseCopyCycles() {
     };
     std::vector<CellID> edges;
     for (const auto& component : components) {
-        const CellID root = component.front();
+        CellID root = component.front();
         Cell& target = cells[root];
         edges.clear();
         collectCopies(root, root, edges);
         for (size_t i = 1; i < component.size(); ++i) {
             Cell& source = cells[component[i]];
-            target.pts |= source.pts;
+            CellID retired = component[i];
+            cellPts->unionPts(root, retired);
             collectCopies(component[i], root, edges);
             target.geps.insert(target.geps.end(), source.geps.begin(), source.geps.end());
             target.indirect.insert(target.indirect.end(), source.indirect.begin(), source.indirect.end());
@@ -451,12 +469,16 @@ void FlowSensitiveCG::collapseCopyCycles() {
                             targetStrides.push_back(stride);
                 }
             }
-            source.pts.clear(); source.sent.clear(); source.copies.clear();
+            cellPts->clearFullPts(retired);
+            cellPts->clearPropaPts(retired);
+            // Retired cells are never solved again; release their last delta too.
+            cellPts->computeDiffPts(retired, cellPts->getPts(retired));
+            source.copies.clear();
             source.geps.clear(); source.indirect.clear(); source.queued = false;
             ++mergedCount;
         }
         replaceCopies(root, edges);
-        target.sent.clear();
+        cellPts->clearPropaPts(root);
         enqueue(root);
     }
     if (!components.empty()) {
@@ -560,7 +582,7 @@ void FlowSensitiveCG::expandGepStrides(CellID dst, PointsTo& targets) {
     if (found == strides.end() || targets.empty()) return;
     PointsTo expanded;
     const auto initials = CGSFR::expandGep(targets, found->second,
-        [&](NodeID object) { return cells[dst].pts.test(object); },
+        [&](NodeID object) { return cellPts->getPts(dst).test(object); },
         [&](NodeID object) { return !isBlkObjOrConstantObj(object) && !isFieldInsensitive(object); },
         [&](NodeID object, CGSFR::Weight stride) {
             // All witnessed edges are nonnegative. Repeating the whole cycle
@@ -574,7 +596,7 @@ void FlowSensitiveCG::expandGepStrides(CellID dst, PointsTo& targets) {
         [&](NodeID object) { expanded.set(object); });
     if (!initials) return;
     ++expansionCalls;
-    expanded -= cells[dst].pts;
+    expanded -= cellPts->getPts(dst);
     expanded -= targets;
     strideFacts += expanded.count();
     targets |= expanded;
@@ -642,7 +664,7 @@ void FlowSensitiveCG::solveConstraints() {
 }
 void FlowSensitiveCG::finalize() {
     for (const auto& entry : values)
-        getPTDataTy()->unionPts(entry.first, cells[representative(entry.second)].pts);
+        getPTDataTy()->unionPts(entry.first, cellPts->getPts(representative(entry.second)));
     // SVF normalizes field objects through getPts/clearPts/addPts at finalize.
     // Use one storage backend for all three operations from this point onward.
     resultExported = true;
