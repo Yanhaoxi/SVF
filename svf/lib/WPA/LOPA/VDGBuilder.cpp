@@ -231,6 +231,11 @@ struct LOPAFrontend::VDGBuildContext
     NodeVector touchedYieldLocs;
     Map<NodeID, NodeVector> deltaSrcCacheByDst;
 
+    // Reset equivalence state per object while retaining capacity for the build.
+    VersionDSU equivDsu;
+    std::vector<Version> rootToDense;
+    std::vector<Version> versionToDense;
+
     // Profiling accumulators.
     HotProfile profile;
     VDGStats exportedStats;
@@ -569,7 +574,6 @@ void LOPAFrontend::VDGBuildContext::compressEquivVersions()
         return;
     }
 
-    VersionDSU equivDsu;
     equivDsu.reset(nextVersion);
     for (const std::pair<Version, Version> &eq : equiv)
         (void)equivDsu.unite(eq.first, eq.second);
@@ -577,8 +581,8 @@ void LOPAFrontend::VDGBuildContext::compressEquivVersions()
     // Build root -> dense-version map (1..N) after DSU is frozen.
     // Versions are already dense in [1..nextVersion], so vector remap is
     // cheaper than per-lookup hash maps in this hot path.
-    std::vector<Version> rootToDense(static_cast<size_t>(nextVersion) + 1, LOPAFrontend::invalidVersion);
-    std::vector<Version> versionToDense(static_cast<size_t>(nextVersion) + 1, LOPAFrontend::invalidVersion);
+    rootToDense.assign(static_cast<size_t>(nextVersion) + 1, LOPAFrontend::invalidVersion);
+    versionToDense.assign(static_cast<size_t>(nextVersion) + 1, LOPAFrontend::invalidVersion);
     Version nextDense = LOPAFrontend::invalidVersion;
     for (Version v = LOPAFrontend::invalidVersion + 1; v <= nextVersion; ++v)
     {
@@ -594,7 +598,7 @@ void LOPAFrontend::VDGBuildContext::compressEquivVersions()
         versionToDense[v] = denseSlot;
     }
 
-    auto toDenseVersion = [&versionToDense](const Version oldV) -> Version
+    auto toDenseVersion = [this](const Version oldV) -> Version
     {
         if (oldV == LOPAFrontend::invalidVersion)
             return LOPAFrontend::invalidVersion;
