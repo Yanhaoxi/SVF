@@ -48,8 +48,7 @@ private:
     const OfflineConsumer* offlineConsumer = nullptr;
     void buildOffline(SVFG*, AndersenWaveDiff*, const PointerAnalysis&, const OfflineConsumer&);
     void prelabel();
-    enum class StoreEdgePolicy { ObjectLowerBound, Deferred };
-    void buildVDG(StoreEdgePolicy storeEdges = StoreEdgePolicy::ObjectLowerBound);
+    void buildVDG();
     struct VDGBuildContext;
     void removeAllIndirectSVFGEdges();
     void buildIsStoreLoadMaps();

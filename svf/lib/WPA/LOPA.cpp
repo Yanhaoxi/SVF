@@ -99,8 +99,8 @@ void LOPA::addCopy(NodeID src, NodeID dst) {
 }
 
 void LOPA::initialize() {
-    if (!Options::UsePreCompFieldSensitive() || Options::OPTSVFG() || !Options::VDGPassProfile().empty()) {
-        SVFUtil::errs() << "LOPA requires the original field-sensitive SVFG and disabled pass profiling.\n";
+    if (!Options::UsePreCompFieldSensitive() || Options::OPTSVFG()) {
+        SVFUtil::errs() << "LOPA requires the original field-sensitive SVFG.\n";
         std::exit(1);
     }
     FlowSensitive::initialize();

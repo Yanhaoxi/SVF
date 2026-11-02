@@ -31,7 +31,10 @@ case/
 other.md
 llvm.sh
 test/
-tests/
+tests/*
+!tests/solver/
+tests/solver/*
+!tests/solver/check_vdg_pass_profile.py
 tmp/
 analysis/
 *.dot

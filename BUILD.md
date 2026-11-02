@@ -78,7 +78,6 @@ Artifacts: `PUS-build/bin/wpa`, libraries under `PUS-build/lib/`, and
 
 ```bash
 ./PUS-build/bin/wpa -lopa -ptd=persistent -node-alloc-strat=dense \
-  -lopa-cg-store-policy=deferred \
   -extapi=./PUS-build/lib/extapi.bc \
   /home/yhx/PTA/labv1/test/soundness/simple/fs-load-cache-alias-loop.ll
 ```
@@ -90,11 +89,19 @@ Useful options:
 - `-lopa-vsfs` – LOPA with the VSFS backend
 - `-fspta` – upstream flow-sensitive analysis (baseline)
 - `-vdg-stat` – print VDG statistics
+- `-vdg-pass-profile=on` – print estimation-graph opportunity coverage, then solve normally
+- `'-vdg-pass-profile=kill=1,0;order=B,SPC'` – report estimation-graph sizes and
+  pass times for each strategy, then solve with the selected `-vdg-pass-order`
+  and `-lopa-obj-fs-lower-bound` settings
 - `-vdg-pass-order=SPC` – VDG simplification pass order (e.g. `SPC`, `SPCBLC`)
-- `-lopa-cg-store-policy=deferred|object-lower-bound` – Store preservation policy
-  for PUS and LOPA+CG; use the same policy in comparisons
+- `-lopa-obj-fs-lower-bound=true|false` – Object lower-bound rule, enabled by
+  default for LOPA, LOPA+CG and LOPA+VSFS; disable it for the kill-all ablation
 - `-ptd=persistent -node-alloc-strat=dense` – shared experiment configuration
 
-PUS and LOPA+CG require `-pre-field-sensitive=true`, `-opt-svfg=false`, and an
-empty `-vdg-pass-profile` value, which are the defaults. Keep the build settings,
-extapi file, field options and Store policy identical across compared modes.
+PUS and LOPA+CG require `-pre-field-sensitive=true` and `-opt-svfg=false`, which
+are the defaults. Pass profiling also works with LOPA+VSFS. It preserves the
+`vdg.passprofile.*` output format and runs on separate estimation graphs before
+normal VDG construction; `-vdg-stat` reports the actual VDG. Profiling adds time
+and memory overhead, so leave it disabled for performance measurements. Keep
+the build settings, extapi file, field options and Store policy identical across
+compared modes.

@@ -117,7 +117,6 @@ public:
     static const Option<std::string> VDGPassOrder;
     static const Option<std::string> VDGPassProfile;
     static const Option<bool> LOPAObjFSLowerBound;
-    static const OptionMap<std::string> LOPACGStorePolicy;
     static const Option<bool> LOPANoOffline;
     static const Option<bool> LOPAProfile;
 

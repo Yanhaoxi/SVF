@@ -219,7 +219,6 @@ struct LOPAFrontend::VDGBuildContext
 
     LOPAFrontend &pta;
     const bool enableProfile;
-    const StoreEdgePolicy storeEdges;
     const size_t totalSVFGNodes;
 
     // Shared scratch, reused across objects.
@@ -255,10 +254,9 @@ struct LOPAFrontend::VDGBuildContext
     Version nextVersionBeforeDense = LOPAFrontend::invalidVersion;
     Version nextDenseVersion = LOPAFrontend::invalidVersion;
 
-    VDGBuildContext(LOPAFrontend &pta_, bool enableProfile_, StoreEdgePolicy storeEdges_)
+    VDGBuildContext(LOPAFrontend &pta_, bool enableProfile_)
         : pta(pta_),
           enableProfile(enableProfile_),
-          storeEdges(storeEdges_),
           totalSVFGNodes(pta_.svfg->getTotalNodeNum()),
           discovered(totalSVFGNodes, false),
           consumeVersionByLoc(totalSVFGNodes, LOPAFrontend::invalidVersion),
@@ -683,8 +681,7 @@ void LOPAFrontend::VDGBuildContext::materializeAndSimplify(const std::vector<VDG
         if (consumeV != LOPAFrontend::invalidVersion && yieldV != LOPAFrontend::invalidVersion && consumeV != yieldV)
         {
             const bool keepVirtualStoreCY
-                = storeEdges == StoreEdgePolicy::Deferred
-                || !Options::LOPAObjFSLowerBound()
+                = !Options::LOPAObjFSLowerBound()
                 || pta.fiObjects.find(obj) == pta.fiObjects.end();
             (void)graph->addEdge(consumeV, yieldV, keepVirtualStoreCY);
         }
@@ -1012,21 +1009,18 @@ void LOPAFrontend::prelabel(void)
     }
 }
 
-void LOPAFrontend::buildVDG(StoreEdgePolicy storeEdges)
+void LOPAFrontend::buildVDG()
 {
+    // Profiling owns its estimation graphs and releases them before the real
+    // build. Sweep settings never replace the selected solve configuration.
+    if (!Options::VDGPassProfile().empty())
+        runSVFGPassProfiling(*this, svfg);
+
     const double labelStart = stat->getClk(true);
 
     vdgManager.clear();
     consume.clear();
     yield.clear();
-
-    if (!Options::VDGPassProfile().empty())
-    {
-        runSVFGPassProfiling(*this, svfg);
-        const double totalEndTicks = stat->getClk(true);
-        vdgBuildTime = (totalEndTicks - labelStart) / TIMEINTERVAL;
-        return;
-    }
 
     std::vector<VDGSimplifyPass> passes;
     if (Options::LOPANoOffline())
@@ -1039,7 +1033,7 @@ void LOPAFrontend::buildVDG(StoreEdgePolicy storeEdges)
         buildVDGSimplifyPassPipeline(passes, Options::VDGPassOrder());
     }
 
-    VDGBuildContext ctx(*this, Options::VDGStat(), storeEdges);
+    VDGBuildContext ctx(*this, Options::VDGStat());
     ctx.prepareDeltaIndex();
     ctx.passRuns.assign(passes.size(), 0);
     ctx.passVDGNodeTotal.assign(passes.size(), 0);

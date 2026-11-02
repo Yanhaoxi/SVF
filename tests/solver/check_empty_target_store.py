@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check deferred Store bypass for empty targets and a nonempty weak-update control."""
+"""Check Store preservation for empty targets and a nonempty weak-update control."""
 import argparse
 import json
 from pathlib import Path
@@ -9,8 +9,11 @@ import tempfile
 
 
 def check(wpa, extapi, source, empty, uncompressed, directory,
-          analysis="-lopa-cgfspta", extra_flags=(), expect_retained_before=False,
+          analysis="-lopa-cgfspta", extra_flags=(), expect_retained_before=None,
           backing="mutable"):
+    if expect_retained_before is None:
+        expect_retained_before = (analysis in ("-lopa", "-lopa-cgfspta", "-lopa-vsfs")
+                                  and "-lopa-obj-fs-lower-bound=false" not in extra_flags)
     if not empty:
         source = source.replace("  store ptr null, ptr %slot\n", "")
     directory.mkdir(parents=True, exist_ok=True)

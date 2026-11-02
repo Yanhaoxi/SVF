@@ -38,8 +38,6 @@ void LOPAFrontend::initializeVDG()
     prelabel();
     // Build VDGs in object-major streaming mode (includes simplify + stmt-reliance bind).
     buildVDG();
-    if (!Options::VDGPassProfile().empty())
-        return;
 
     if (Options::DumpVDG())
     {
@@ -86,11 +84,7 @@ void LOPAFrontend::buildOffline(SVFG* graph, AndersenWaveDiff* preanalysis,
     buildIsStoreLoadMaps();
     buildDeltaMaps();
     prelabel();
-    // The default matches CG's nonempty-destination guard. The alternative
-    // explicitly opts into LOPAFrontend's existing object lower-bound construction.
-    const StoreEdgePolicy storeEdges = Options::LOPACGStorePolicy() == "deferred"
-        ? StoreEdgePolicy::Deferred : StoreEdgePolicy::ObjectLowerBound;
-    buildVDG(storeEdges);
+    buildVDG();
     assert(vdgManager.getAllVDGs().empty() && consume.empty() && yield.empty()
            && "Offline graphs must be consumed during construction");
 }

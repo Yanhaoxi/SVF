@@ -47,7 +47,7 @@ def run(args, output):
         outputs = []
         for enabled in (False, True):
             command = [str(args.wpa), *flags, '-ptd=persistent', '-node-alloc-strat=dense',
-                       '-lopa-cg-store-policy=object-lower-bound', '-print-pts',
+                       '-print-pts',
                        f'-extapi={args.extapi}', f'-vdg-stat={str(enabled).lower()}', str(source)]
             result = subprocess.run(command, cwd=output, text=True, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, timeout=120, check=True)

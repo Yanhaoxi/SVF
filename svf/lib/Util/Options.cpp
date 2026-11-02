@@ -245,7 +245,7 @@ const Option<std::string> Options::VDGPassOrder(
 
 const Option<std::string> Options::VDGPassProfile(
     "vdg-pass-profile",
-    "Pass-pattern profiling for VDG (separate from -vdg-stat): 'on' reports opportunity coverage only; a sweep spec such as 'kill=1,0;order=,S,SPC,BL' additionally applies each strategy to the estimation graph and reports the resulting size and per-pass time",
+    "Profile independent VDG estimation graphs before normal construction and solving (separate from -vdg-stat): 'on' reports opportunity coverage; a sweep such as 'kill=1,0;order=,S,SPC,BL' also reports sizes and per-pass time without changing the solve configuration",
     ""
 );
 
@@ -253,16 +253,6 @@ const Option<bool> Options::LOPAObjFSLowerBound(
     "lopa-obj-fs-lower-bound",
     "Pre-estimate object flow-sensitive lower bound and choose store c->y virtual/solid edges accordingly",
     true
-);
-
-const OptionMap<std::string> Options::LOPACGStorePolicy(
-    "lopa-cg-store-policy",
-    "Store bypass construction policy for -lopa-cgfspta (default: deferred)",
-    "deferred",
-    {
-        {"deferred", "deferred", "Keep Store bypass virtual until CG resolves its destination"},
-        {"object-lower-bound", "object-lower-bound", "Use LOPA object lower-bound rules; respects -lopa-obj-fs-lower-bound"}
-    }
 );
 
 const Option<bool> Options::LOPANoOffline(

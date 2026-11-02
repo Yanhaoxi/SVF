@@ -48,7 +48,6 @@ cmake --build PUS-build --target wpa -j 24
 setarch "$(uname -m)" -R /usr/bin/time -v \
   PUS-build/bin/wpa -lopa \
   -ptd=persistent -node-alloc-strat=dense \
-  -lopa-cg-store-policy=deferred \
   -extapi=/home/yhx/PTA/labv2/lib/extapi.bc \
   /home/yhx/PTA/labv1/benchmark/lua.bc \
   > lua.lopa-pus.log 2>&1
@@ -66,10 +65,14 @@ setarch "$(uname -m)" -R /usr/bin/time -v \
 | `-cg-profile=true` | 输出 CG 和 LOPA+CG 的阶段时间，用于诊断。 |
 | `-lopa-no-offline=true` | 关闭 LOPA 离线压缩，用于消融比较。 |
 | `-vdg-stat` | 输出离线压缩后的对象 VDG 统计，支持 PUS、LOPA+CG 和 LOPA+VSFS。 |
+| `-vdg-pass-profile=on` | 在独立估算图上统计简化机会，随后正常构图和求解。 |
+| `'-vdg-pass-profile=kill=1,0;order=B,SPC'` | 扫描估算图的策略组合，输出规模和各 pass 耗时；实际求解仍使用 `-vdg-pass-order` 和 `-lopa-obj-fs-lower-bound` 的设置。 |
 | `-vdg-pass-order=SPC` | 设置 LOPA 简化顺序，默认 `SPC`。 |
 | `-help` | 查看完整参数列表。 |
 
-PUS 和 CG 使用默认的 `-pre-field-sensitive=true`。PUS 与 LOPA+CG 使用默认的 `-opt-svfg=false`，并保持 `-vdg-pass-profile` 为空。SFR 采用显式字段表示，具体实现范围见 [SFR_IMPLEMENTATION.md](../../cgfspta/SFR_IMPLEMENTATION.md)。
+PUS 和 CG 使用默认的 `-pre-field-sensitive=true`。PUS 与 LOPA+CG 使用默认的 `-opt-svfg=false`。SFR 采用显式字段表示，具体实现范围见 [SFR_IMPLEMENTATION.md](../../cgfspta/SFR_IMPLEMENTATION.md)。
+
+`-vdg-pass-profile` 支持 PUS、LOPA+CG 和 LOPA+VSFS，保留原有 `vdg.passprofile.*` 输出格式。统计完成后释放估算图，再构建实际 VDG 并求解，因此扫描中的策略不会改变求解配置。该选项增加时间和内存开销，性能测量时应关闭。
 
 `-vdg-stat` 输出 `# VDG stats`，包括对象图数、`total_supernodes`、solid/virtual 边数及节点数分布。PUS 和 CG 在导出并释放每个对象图之前累计这些统计，因此无需保留整张 VDG。它描述离线压缩结果；在线 Copy SCC 合并效果查看下文的 PUS 计数。
 
@@ -77,22 +80,13 @@ CG 主求解通过独立的 `DiffPTData` 保存以 `CellID` 为键的集合。`p
 
 本次 CG 存储修复的验证构建为 `CGPTD-build/bin/wpa`，检查记录见[修复报告](../../../labv3/cg-ptd/REPORT.md)。旧 CG 构建仅在前分析和最终导出时使用 persistent；既有测量需按二进制版本区分。
 
-LOPA 和 LOPA+CG 的 Store 旧值保留规则由 `-lopa-cg-store-policy` 选择：
+LOPA、LOPA+CG 和 LOPA+VSFS 共用 `-lopa-obj-fs-lower-bound`，默认开启。构图时，对前分析确定可按对象下界保留旧值的对象，将 Store 的 IN→OUT 依赖设为 solid，其余保留为 virtual；在线求解继续按强弱更新处理 Store。关闭该开关使这类 Store 依赖保持 virtual，用于 `kill-all` 消融。
 
-| 值 | 行为 |
-| --- | --- |
-| `deferred`（默认） | 等 Store 目标非空后，由求解器按强弱更新条件决定是否保留旧值。与纯 CG 对比时使用此值。 |
-| `object-lower-bound` | 沿用 LOPA 对象下界规则，提前保留部分对象的旧值；仍受 `-lopa-obj-fs-lower-bound` 控制。 |
-
-该选项影响 `-lopa` 和 `-lopa-cgfspta`。两种规则在空目标 Store 上可能产生不同结果，实验中需明确记录所选值。
-
-该策略在 VDG 简化前决定边类型，因此会影响压缩后的状态映射和导出的依赖。PUS 和 CG 将 solid 边转为 Copy。`object-lower-bound` 在空目标 Store 上提前保留旧值的行为作为已知语义差异保留，与 CG 参考结果逐项对齐时使用 `deferred`。比较压缩收益时固定策略，分别记录两种配置的结果。LOPA+VSFS 继续使用其原有对象下界规则和版本依赖。
+`-lopa-no-offline` 关闭 Load 可达性剪枝、DSU 等价合并和 VDG 简化 passes，不改变对象下界开关。比较离线压缩收益时，两侧保持相同的下界设置。纯 CG 不经过 LOPA 前端，不受此开关影响。在空目标 Store 上，开启对象下界可能保留纯 CG 中没有的旧值；这是应单独记录的保守差异。
 
 构建后可运行集合存储、Store 策略和间接递归回归：
 
 ```sh
-python3 /home/yhx/PTA/labv2/lopa-pus/semantic/run.py PUS-build/bin/wpa \
-  --require-pus --extapi /home/yhx/PTA/labv2/lib/extapi.bc
 python3 tests/solver/check_cg_ptd.py PUS-build/bin/wpa \
   --extapi /home/yhx/PTA/labv1/lib/extapi.bc
 python3 tests/solver/check_lopa_vdg_stats.py PUS-build/bin/wpa \

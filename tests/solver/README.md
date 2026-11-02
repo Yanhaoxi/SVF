@@ -1,5 +1,20 @@
 # Analysis regressions
 
+Check that VDG pass profiling preserves the complete points-to sets and actual
+VDG summaries for PUS, CG Wave, CG SFR and VSFS:
+
+```bash
+python3 tests/solver/check_vdg_pass_profile.py PUS-build/bin/wpa \
+  --extapi=PUS-build/lib/extapi.bc
+```
+
+The check covers coverage and strategy sweeps, both storage backends, late
+recursion and its nonrecursive control, empty Store targets, the object lower
+bound off, offline compression off, and empty input graphs. Add
+`--reference-wpa=/path/to/pre-change/wpa` to compare the old statistics and
+unprofiled analysis results as well. `--output=/tmp/vdg-pass-profile` retains
+commands, logs and a JSON summary.
+
 Check mutable and persistent storage in the four CG modes:
 
 ```bash
@@ -24,7 +39,7 @@ also checks that the corresponding nonrecursive program retains strong updates.
 Both cases run with default compression and with `-lopa-no-offline`. Node IDs are
 resolved from the generated PAG, rather than assumed from allocation order.
 
-For the CG adapter, check deferred Store bypass with an empty destination:
+For the CG adapter, check Store preservation with an empty destination:
 
 ```bash
 python3 tests/solver/check_empty_target_store.py Integration-build/bin/wpa \
@@ -46,8 +61,9 @@ python3 tests/solver/check_store_policy.py Integration-build/bin/wpa \
   --extapi=/home/yhx/PTA/labv1/lib/extapi.bc --output=/tmp/cg-store-policy
 ```
 
-`-lopa-cg-store-policy=deferred` is the default. Explicit
-`object-lower-bound` uses the existing LOPA rule and retains the earlier object
-in this array example; disabling `-lopa-obj-fs-lower-bound` restores the deferred
-result. The check also verifies the nonempty control, that the adapter option
-does not affect pure CG, and rejection of an invalid policy value.
+`-lopa-obj-fs-lower-bound` is enabled by default for LOPA and LOPA+CG.
+The check covers default/on/off settings, empty and nonempty Store targets,
+compression on/off, and both CG backends plus PUS. Pure CG is checked separately
+and is unaffected by the offline lower-bound switch. With the lower bound on,
+the empty-target array case retains the old object; with it off, that result is
+empty. Run with `--ptd=mutable` and `--ptd=persistent` to check both stores.

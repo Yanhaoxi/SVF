@@ -270,8 +270,8 @@ void FlowSensitiveCG::initialize() {
                        << "memory constraints use the preanalysis field model.\n";
         std::exit(1);
     }
-    if (lopaFrontend && (Options::OPTSVFG() || !Options::VDGPassProfile().empty())) {
-        SVFUtil::errs() << "LOPA+CG requires the original SVFG and disabled VDG pass profiling.\n";
+    if (lopaFrontend && Options::OPTSVFG()) {
+        SVFUtil::errs() << "LOPA+CG requires the original SVFG.\n";
         std::exit(1);
     }
     FlowSensitive::initialize();
